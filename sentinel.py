@@ -54,7 +54,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_TO      = os.getenv("ALERT_TO", "")
 
 # Persisted state file (committed back to repo by the workflow)
-STATE_FILE = Path("state/worst.json")
+STATE_FILE = Path("worst.json")
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
