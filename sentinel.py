@@ -7,6 +7,12 @@ when an earlier slot becomes available than the one previously recorded.
 Designed to run as a GitHub Actions scheduled job.
 State (the WORST date) is persisted in state/worst.json, which is committed
 back to the repository after each run by the workflow.
+
+HotDoc is a JavaScript-rendered Ember.js SPA. The scraping strategy is:
+  1. Open the page in headless Chrome and wait for it to fully render.
+  2. Intercept the XHR/fetch calls the page makes to HotDoc's API to grab
+     the availability data directly from the network response.
+  3. Fall back to scanning rendered DOM text if the network intercept misses.
 """
 
 import json
@@ -15,6 +21,7 @@ import re
 import smtplib
 import logging
 import sys
+import traceback
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -25,12 +32,17 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 
 HOTDOC_URL = (
-    "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/blackbutt-medical-centre/doctors/lorna-montgomery"
+    "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/"
+    "blackbutt-medical-centre/doctors/lorna-montgomery"
 )
+
+# How long (seconds) to wait for the page to render appointment data.
+PAGE_LOAD_TIMEOUT = 30
 
 # Email – set via GitHub Actions secrets (see README)
 SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -40,7 +52,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_TO      = os.getenv("ALERT_TO", "")
 
 # Persisted state file (committed back to repo by the workflow)
-STATE_FILE = Path("worst.json")
+STATE_FILE = Path("state/worst.json")
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -71,70 +83,215 @@ def save_worst(dt: datetime) -> None:
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
 
-def get_next_appointment() -> datetime | None:
+def _make_driver() -> webdriver.Chrome:
+    """Create a headless Chrome driver with network logging enabled."""
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,900")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    # Enable browser-level network logging so we can intercept API responses.
+    opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     opts.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     )
+    return webdriver.Chrome(options=opts)
 
-    driver = webdriver.Chrome(options=opts)
+
+def _dates_from_network_log(driver: webdriver.Chrome) -> list[datetime]:
+    """
+    Pull network responses from the Chrome performance log and look for
+    HotDoc API responses that contain appointment availability data.
+    """
+    dates: list[datetime] = []
     try:
-        log.info("Fetching HotDoc page …")
-        driver.get(HOTDOC_URL)
+        logs = driver.get_log("performance")
+    except Exception:
+        return dates
 
-        wait = WebDriverWait(driver, 20)
-        slots = wait.until(
-            EC.presence_of_all_elements_located(
-                (
-                    By.CSS_SELECTOR,
-                    "[data-testid='appointment-slot'], "
-                    ".appointment-slot, "
-                    "[class*='AppointmentSlot'], "
-                    "[class*='available-slot'], "
-                    "button[aria-label*='appointment']",
-                )
+    for entry in logs:
+        try:
+            msg = json.loads(entry["message"])["message"]
+            # We only care about Network responses that contain body data.
+            if msg.get("method") != "Network.responseReceived":
+                continue
+            url = msg.get("params", {}).get("response", {}).get("url", "")
+            # HotDoc availability calls typically hit /api/... or /available_times
+            if not any(kw in url for kw in ("available", "appointment", "slot", "timeslot", "booking")):
+                continue
+            # Fetch the response body via CDP
+            request_id = msg["params"]["requestId"]
+            body_result = driver.execute_cdp_cmd(
+                "Network.getResponseBody", {"requestId": request_id}
             )
-        )
-        log.info("Found %d slot element(s).", len(slots))
+            body = body_result.get("body", "")
+            if not body:
+                continue
+            log.info("Inspecting API response from: %s", url)
+            # Try to parse as JSON and hunt for date strings
+            try:
+                data = json.loads(body)
+                dates.extend(_extract_dates_from_json(data))
+            except json.JSONDecodeError:
+                dates.extend(_extract_dates_from_text(body))
+        except Exception:
+            continue
 
-        dates: list[datetime] = []
-        for slot in slots:
-            for attr in ("datetime", "data-datetime", "aria-label", "title"):
-                raw = slot.get_attribute(attr) or ""
-                dt = _try_parse(raw.strip())
+    return dates
+
+
+def _extract_dates_from_json(obj, depth: int = 0) -> list[datetime]:
+    """Recursively walk a JSON object looking for ISO date strings."""
+    if depth > 10:
+        return []
+    dates = []
+    if isinstance(obj, str):
+        dt = _try_parse(obj)
+        if dt:
+            dates.append(dt)
+    elif isinstance(obj, list):
+        for item in obj:
+            dates.extend(_extract_dates_from_json(item, depth + 1))
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            dates.extend(_extract_dates_from_json(v, depth + 1))
+    return dates
+
+
+def _dom_dates(driver: webdriver.Chrome) -> list[datetime]:
+    """
+    Scan the rendered DOM for date-like text. Works as a fallback when
+    the network intercept doesn't capture anything useful.
+    Looks for common HotDoc slot patterns like "Mon 14 Jul" or "9:00 AM".
+    """
+    dates: list[datetime] = []
+
+    # Strategy A: look for time elements with datetime attributes
+    try:
+        time_els = driver.find_elements(By.TAG_NAME, "time")
+        for el in time_els:
+            raw = el.get_attribute("datetime") or el.text or ""
+            dt = _try_parse(raw.strip())
+            if dt:
+                dates.append(dt)
+    except Exception:
+        pass
+
+    # Strategy B: look for buttons / divs that contain date text
+    try:
+        candidates = driver.find_elements(
+            By.CSS_SELECTOR,
+            "button, [role='button'], [class*='slot'], [class*='time'], [class*='avail']"
+        )
+        for el in candidates:
+            for attr in ("datetime", "data-datetime", "aria-label", "title", "data-date"):
+                raw = (el.get_attribute(attr) or "").strip()
+                dt = _try_parse(raw)
                 if dt:
                     dates.append(dt)
-                    break
+            # Also check visible text
+            dt = _try_parse((el.text or "").strip())
+            if dt:
+                dates.append(dt)
+    except Exception:
+        pass
 
-        if not dates:
-            log.info("No dated slots via CSS; scanning page text …")
-            dates = _extract_dates_from_text(
-                driver.find_element(By.TAG_NAME, "body").text
-            )
+    # Strategy C: full page text scan
+    if not dates:
+        try:
+            page_text = driver.find_element(By.TAG_NAME, "body").text
+            dates.extend(_extract_dates_from_text(page_text))
+        except Exception:
+            pass
+
+    return dates
+
+
+def get_next_appointment() -> datetime | None:
+    """
+    Open the HotDoc page, let it render, then extract the earliest available
+    appointment date using network intercept + DOM fallback.
+    Returns None if nothing could be found.
+    """
+    driver = _make_driver()
+    try:
+        # Enable CDP network tracking before navigating
+        driver.execute_cdp_cmd("Network.enable", {})
+
+        log.info("Navigating to HotDoc page …")
+        driver.get(HOTDOC_URL)
+
+        # Wait for the page to show *something* meaningful.
+        # HotDoc renders a loading spinner first; we wait for it to disappear
+        # or for any interactive element to appear.
+        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
+        try:
+            # Wait until the page title changes away from the generic one
+            wait.until(lambda d: "Montgomery" in d.title or "Blackbutt" in d.title or
+                       len(d.find_elements(By.CSS_SELECTOR, "button, [role='button']")) > 3)
+            log.info("Page appears to have rendered. Title: %s", driver.title)
+        except TimeoutException:
+            log.warning("Timed out waiting for page render – proceeding anyway.")
+
+        # Give JS a moment to finish any final async data fetches
+        import time
+        time.sleep(5)
+
+        # Dump page source snippet for debugging
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text
+            snippet = body_text[:500].replace("\n", " ")
+            log.info("Page text snippet: %s", snippet)
+        except Exception:
+            log.warning("Could not read page body text.")
+
+        # --- Primary strategy: network log ---
+        dates = _dates_from_network_log(driver)
+        if dates:
+            log.info("Found %d date(s) via network intercept.", len(dates))
+        else:
+            log.info("Network intercept found no dates – trying DOM scan …")
+            dates = _dom_dates(driver)
+            log.info("DOM scan found %d date(s).", len(dates))
 
         if dates:
-            earliest = min(dates)
-            log.info("Earliest slot found: %s", earliest)
-            return earliest
+            # Filter out dates in the past
+            now = datetime.now()
+            future_dates = [d for d in dates if d >= now.replace(hour=0, minute=0, second=0, microsecond=0)]
+            if future_dates:
+                earliest = min(future_dates)
+                log.info("Earliest future slot: %s", earliest.date())
+                return earliest
+            log.info("All found dates are in the past – ignoring.")
 
         log.info("No appointment dates found.")
         return None
 
     except Exception as exc:
         log.error("Scrape error: %s", exc)
+        log.error(traceback.format_exc())
+        # Save a screenshot for debugging
+        try:
+            driver.save_screenshot("debug_screenshot.png")
+            log.info("Screenshot saved to debug_screenshot.png")
+        except Exception:
+            pass
         return None
     finally:
         driver.quit()
 
 
+# ─── DATE PARSING ─────────────────────────────────────────────────────────────
+
 _DATE_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M%z",
     "%Y-%m-%dT%H:%M",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
@@ -142,14 +299,24 @@ _DATE_FORMATS = [
     "%d/%m/%Y %H:%M",
     "%d/%m/%Y",
     "%d %b %Y %I:%M %p",
+    "%d %b %Y",
     "%A %d %B %Y",
+    "%a %d %b %Y",
+    "%a %d %b",         # "Mon 14 Jul" – year assumed current
 ]
 
 
 def _try_parse(text: str) -> datetime | None:
+    text = text.strip()
+    if not text or len(text) < 5:
+        return None
     for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(text, fmt)
+            dt = datetime.strptime(text, fmt)
+            # If no year was parsed, assume current year
+            if dt.year == 1900:
+                dt = dt.replace(year=datetime.now().year)
+            return dt
         except ValueError:
             continue
     return None
@@ -157,13 +324,15 @@ def _try_parse(text: str) -> datetime | None:
 
 def _extract_dates_from_text(text: str) -> list[datetime]:
     pattern = re.compile(
-        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2} \w+ \d{4})"
-        r"(?:[^\d]*(\d{1,2}:\d{2}(?:\s?[APap][Mm])?))?",
+        r"(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2})?)?)"  # ISO
+        r"|(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"                                            # d/m/Y
+        r"|(\d{1,2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w* \d{4})",    # d Mon YYYY
         re.IGNORECASE,
     )
     results = []
     for m in pattern.finditer(text):
-        dt = _try_parse(m.group(0).strip())
+        raw = m.group(0).strip()
+        dt = _try_parse(raw)
         if dt:
             results.append(dt)
     return results
@@ -175,11 +344,12 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
         log.warning("Email credentials not configured – skipping alert.")
         return
 
-    subject = f"🗓 Earlier appointment available – {new_date.strftime('%a %-d %b %Y')}"
+    date_str = new_date.strftime("%-d %b %Y") if new_date.hour == 0 else new_date.strftime("%-d %b %Y at %-I:%M %p")
+    subject = f"🗓 Earlier appointment available – {date_str}"
     body = (
         f"An earlier appointment with Dr Lorna Montgomery is now available!\n\n"
-        f"  New slot  : {new_date.strftime('%A %-d %B %Y')}\n"
-        f"  Previous  : {worst_date.strftime('%A %-d %B %Y')}\n\n"
+        f"  New slot  : {date_str}\n"
+        f"  Previous  : {worst_date.strftime('%-d %b %Y')}\n\n"
         f"Book now → {HOTDOC_URL}\n\n"
         f"— Appointment Sentinel"
     )
@@ -214,13 +384,11 @@ def main() -> None:
         return
 
     if worst is None:
-        # First ever run – record this date as WORST and start watching.
         log.info("First run – recording WORST as %s", next_appt.date())
         save_worst(next_appt)
         return
 
     if next_appt >= worst:
-        # Slot is the same or later – update WORST if later, then keep watching.
         if next_appt > worst:
             log.info("Slot moved later (%s → %s) – updating WORST.", worst.date(), next_appt.date())
             save_worst(next_appt)
@@ -231,9 +399,7 @@ def main() -> None:
     # next_appt < worst → strictly earlier slot found!
     log.info("🎉 Earlier slot found: %s < WORST %s", next_appt.date(), worst.date())
     send_alert(next_appt, worst)
-    # Note: WORST is intentionally NOT updated here.
-    # This means we keep alerting on subsequent runs as long as any slot
-    # remains earlier than the original WORST — including Aug 1 < Aug 3, etc.
+    # WORST is intentionally NOT updated – keeps alerting until you book.
 
 
 if __name__ == "__main__":
