@@ -38,7 +38,7 @@ jobs:
           SMTP_USER:     ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           ALERT_TO:      ${{ secrets.ALERT_TO }}
-        run: python sentinel_v2.py
+        run: python sentinel.py
 
       # If the scrape failed, a debug screenshot will have been saved.
       # Upload it so you can download it from the Actions run and see what
