@@ -2,12 +2,11 @@ name: Appointment Sentinel
 
 on:
   schedule:
-    # Runs every 30 minutes
     - cron: "*/30 * * * *"
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 permissions:
-  contents: write  # Needed to commit the updated state/worst.json back
+  contents: write
 
 jobs:
   check:
@@ -17,8 +16,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Use a PAT if you want the commit to trigger other workflows,
-          # otherwise the default GITHUB_TOKEN is fine.
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
@@ -41,13 +38,23 @@ jobs:
           SMTP_USER:     ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           ALERT_TO:      ${{ secrets.ALERT_TO }}
-        run: python sentinel.py
+        run: python sentinel_v2.py
+
+      # If the scrape failed, a debug screenshot will have been saved.
+      # Upload it so you can download it from the Actions run and see what
+      # the browser actually rendered.
+      - name: Upload debug screenshot (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: debug_screenshot.png
+          if-no-files-found: ignore
 
       - name: Commit updated WORST state
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add worst.json
-          # Only commit if the file actually changed
+          git add state/worst.json
           git diff --cached --quiet || git commit -m "chore: update WORST date [skip ci]"
           git push
