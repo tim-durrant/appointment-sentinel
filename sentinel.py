@@ -268,7 +268,7 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = SMTP_USER
+    msg["From"]    = f"Appointment checker"
     msg["To"]      = ALERT_TO
     msg.attach(MIMEText(body, "plain"))
 
