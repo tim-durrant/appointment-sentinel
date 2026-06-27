@@ -1,8 +1,6 @@
 name: Appointment Sentinel
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
