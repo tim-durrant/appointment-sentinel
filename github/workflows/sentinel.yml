@@ -1,0 +1,53 @@
+name: Appointment Sentinel
+
+on:
+  schedule:
+    # Runs every 30 minutes
+    - cron: "*/30 * * * *"
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+permissions:
+  contents: write  # Needed to commit the updated state/worst.json back
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use a PAT if you want the commit to trigger other workflows,
+          # otherwise the default GITHUB_TOKEN is fine.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Chrome & ChromeDriver
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Run sentinel
+        env:
+          SMTP_HOST:     ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:     ${{ secrets.SMTP_PORT }}
+          SMTP_USER:     ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_TO:      ${{ secrets.ALERT_TO }}
+        run: python sentinel.py
+
+      - name: Commit updated WORST state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/worst.json
+          # Only commit if the file actually changed
+          git diff --cached --quiet || git commit -m "chore: update WORST date [skip ci]"
+          git push
