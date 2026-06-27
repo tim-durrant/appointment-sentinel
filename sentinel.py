@@ -29,8 +29,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 
 HOTDOC_URL = (
-    "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/"
-    "blackbutt-medical-centre/doctors/lorna-montgomery"
+    "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/blackbutt-medical-centre/doctors/lorna-montgomery"
 )
 
 # Email – set via GitHub Actions secrets (see README)
@@ -41,7 +40,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_TO      = os.getenv("ALERT_TO", "")
 
 # Persisted state file (committed back to repo by the workflow)
-STATE_FILE = Path("state/worst.json")
+STATE_FILE = Path("worst.json")
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
