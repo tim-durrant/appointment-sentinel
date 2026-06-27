@@ -4,13 +4,9 @@ Appointment Sentinel
 Monitors HotDoc for the next available appointment and emails you
 when an earlier slot becomes available than the one previously recorded.
 
-Designed to run as a GitHub Actions scheduled job.
-State (the WORST date) is persisted in state/worst.json, which is committed
-back to the repository after each run by the workflow.
-
-Scraping strategy:
-  Wait for the text "Appointments available from:" to appear on the page,
-  then extract the date/time that follows it.
+Email deduplication rules:
+  - Only send if "new slot" or "previous" has changed since the last email, OR
+  - 24 hours have passed since the last email with the same content.
 """
 
 import json
@@ -20,8 +16,7 @@ import smtplib
 import logging
 import sys
 import traceback
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -40,20 +35,16 @@ HOTDOC_URL = (
     "blackbutt-medical-centre/doctors/lorna-montgomery"
 )
 
-# The label text that appears just before the date we want
-AVAILABILITY_LABEL = "Appointments available from:"
+AVAILABILITY_LABEL  = "Appointments available from:"
+PAGE_LOAD_TIMEOUT   = 30
+EMAIL_REPEAT_HOURS  = 24   # Re-send same content after this many hours
 
-# How long (seconds) to wait for the availability text to appear
-PAGE_LOAD_TIMEOUT = 30
-
-# Email – set via GitHub Actions secrets (see README)
 SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_TO      = os.getenv("ALERT_TO", "")
 
-# Persisted state file (committed back to repo by the workflow)
 STATE_FILE = Path("worst.json")
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
@@ -67,21 +58,90 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── STATE ────────────────────────────────────────────────────────────────────
+#
+# State file schema:
+# {
+#   "worst": "2026-08-03T14:30:00",   ← latest known appointment datetime
+#   "last_email": {
+#     "new_slot":  "2026-07-15T09:00:00",
+#     "previous":  "2026-08-03T14:30:00",
+#     "sent_at":   "2026-06-27T08:00:00"
+#   }
+# }
 
-def load_worst() -> datetime | None:
+def _load_state() -> dict:
     if STATE_FILE.exists():
         try:
-            raw = json.loads(STATE_FILE.read_text()).get("worst")
-            return datetime.fromisoformat(raw) if raw else None
+            return json.loads(STATE_FILE.read_text())
         except Exception as exc:
             log.warning("Could not read state: %s", exc)
-    return None
+    return {}
+
+
+def _save_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def load_worst() -> datetime | None:
+    raw = _load_state().get("worst")
+    return datetime.fromisoformat(raw) if raw else None
 
 
 def save_worst(dt: datetime) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({"worst": dt.isoformat()}, indent=2))
-    log.info("WORST date saved → %s", dt.date())
+    state = _load_state()
+    state["worst"] = dt.isoformat()
+    _save_state(state)
+    log.info("WORST date saved → %s", dt)
+
+
+def load_last_email() -> dict | None:
+    return _load_state().get("last_email")
+
+
+def save_last_email(new_slot: datetime, previous: datetime) -> None:
+    state = _load_state()
+    state["last_email"] = {
+        "new_slot":  new_slot.isoformat(),
+        "previous":  previous.isoformat(),
+        "sent_at":   datetime.now().isoformat(),
+    }
+    _save_state(state)
+    log.info("Last email record saved.")
+
+# ─── EMAIL DEDUPLICATION ──────────────────────────────────────────────────────
+
+def should_send_email(new_slot: datetime, previous: datetime) -> bool:
+    """
+    Return True if we should send an alert email, based on:
+      1. Content changed (new_slot or previous differs from last email), OR
+      2. 24+ hours have passed since the last email with identical content.
+    """
+    last = load_last_email()
+
+    if last is None:
+        log.info("No previous email on record – will send.")
+        return True
+
+    last_new_slot  = datetime.fromisoformat(last["new_slot"])
+    last_previous  = datetime.fromisoformat(last["previous"])
+    last_sent_at   = datetime.fromisoformat(last["sent_at"])
+
+    content_changed = (new_slot != last_new_slot) or (previous != last_previous)
+    if content_changed:
+        log.info("Email content has changed – will send.")
+        return True
+
+    hours_since = (datetime.now() - last_sent_at).total_seconds() / 3600
+    if hours_since >= EMAIL_REPEAT_HOURS:
+        log.info("%.1f hours since last identical email – will resend.", hours_since)
+        return True
+
+    log.info(
+        "Suppressing duplicate email (content unchanged, only %.1fh since last send).",
+        hours_since,
+    )
+    return False
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
 
@@ -103,17 +163,11 @@ def _make_driver() -> webdriver.Chrome:
 
 
 def get_next_appointment() -> datetime | None:
-    """
-    Opens the HotDoc page and waits for the text:
-      "Appointments available from: 3 Aug, 2:30 pm"
-    then parses and returns that date.
-    """
     driver = _make_driver()
     try:
         log.info("Navigating to HotDoc page …")
         driver.get(HOTDOC_URL)
 
-        # Wait until the availability label appears in the page
         log.info("Waiting for '%s' to appear …", AVAILABILITY_LABEL)
         try:
             WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
@@ -123,37 +177,27 @@ def get_next_appointment() -> datetime | None:
             )
         except TimeoutException:
             log.warning("Timed out waiting for availability text.")
-            # Save screenshot for debugging
             driver.save_screenshot("debug_screenshot.png")
-            log.info("Debug screenshot saved.")
-            # Log what the page actually says
             try:
-                snippet = driver.find_element(By.TAG_NAME, "body").text[:800]
-                log.info("Page text snippet:\n%s", snippet)
+                log.info("Page text:\n%s", driver.find_element(By.TAG_NAME, "body").text[:800])
             except Exception:
                 pass
             return None
 
-        # Extract the full page text and find the date after the label
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        log.info("Page loaded successfully.")
-
         idx = page_text.find(AVAILABILITY_LABEL)
         if idx == -1:
-            log.error("Label not found in page text despite wait succeeding.")
+            log.error("Label not found in page text.")
             return None
 
-        # Grab the text immediately after the label (up to ~40 chars)
         after_label = page_text[idx + len(AVAILABILITY_LABEL):].strip()[:40]
         log.info("Text after label: '%s'", after_label)
 
-        # Parse "3 Aug, 2:30 pm" or "3 Aug" etc.
         dt = _parse_hotdoc_date(after_label)
         if dt:
             log.info("Parsed appointment date: %s", dt)
         else:
             log.warning("Could not parse date from: '%s'", after_label)
-
         return dt
 
     except Exception as exc:
@@ -161,7 +205,6 @@ def get_next_appointment() -> datetime | None:
         log.error(traceback.format_exc())
         try:
             driver.save_screenshot("debug_screenshot.png")
-            log.info("Debug screenshot saved.")
         except Exception:
             pass
         return None
@@ -170,37 +213,20 @@ def get_next_appointment() -> datetime | None:
 
 
 def _parse_hotdoc_date(text: str) -> datetime | None:
-    """
-    Parse HotDoc's availability date string.
-    Examples seen:
-      "3 Aug, 2:30 pm"
-      "3 Aug"
-      "14 Jul, 9:00 am"
-      "3 Aug, 2:30 pm..."  (may have trailing text)
-    """
-    # Clean up trailing punctuation/newlines
     text = text.split("\n")[0].strip().rstrip(".")
-
-    # Regex: "3 Aug, 2:30 pm" or "3 Aug"
     pattern = re.compile(
-        r"(\d{1,2})\s+(\w+)"          # day + month name
-        r"(?:,\s*(\d{1,2}:\d{2})\s*([aApP][mM]))?",  # optional time
+        r"(\d{1,2})\s+(\w+)"
+        r"(?:,\s*(\d{1,2}:\d{2})\s*([aApP][mM]))?",
         re.IGNORECASE,
     )
     m = pattern.search(text)
     if not m:
         return None
 
-    day   = m.group(1)
-    month = m.group(2)
-    ttime = m.group(3)  # e.g. "2:30"
-    ampm  = m.group(4)  # e.g. "pm"
-
+    day, month, ttime, ampm = m.group(1), m.group(2), m.group(3), m.group(4)
     year = datetime.now().year
-    # If the month looks like it's already passed this year, use next year
     try:
-        test = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
-        if test < datetime.now():
+        if datetime.strptime(f"{day} {month} {year}", "%d %b %Y") < datetime.now():
             year += 1
     except ValueError:
         pass
@@ -225,14 +251,17 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
         log.warning("Email credentials not configured – skipping alert.")
         return
 
-    new_str   = new_date.strftime("%-d %b %Y at %-I:%M %p") if new_date.hour else new_date.strftime("%-d %b %Y")
-    worst_str = worst_date.strftime("%-d %b %Y at %-I:%M %p") if worst_date.hour else worst_date.strftime("%-d %b %Y")
+    if not should_send_email(new_date, worst_date):
+        return
 
-    subject = f"🗓 Earlier appointment available – {new_str}"
+    def fmt(dt: datetime) -> str:
+        return dt.strftime("%-d %b %Y at %-I:%M %p") if dt.hour or dt.minute else dt.strftime("%-d %b %Y")
+
+    subject = f"🗓 Earlier appointment available – {fmt(new_date)}"
     body = (
         f"An earlier appointment with Dr Lorna Montgomery is now available!\n\n"
-        f"  New slot  : {new_str}\n"
-        f"  Previous  : {worst_str}\n\n"
+        f"  New slot  : {fmt(new_date)}\n"
+        f"  Previous  : {fmt(worst_date)}\n\n"
         f"Book now → {HOTDOC_URL}\n\n"
         f"— Appointment Sentinel"
     )
@@ -250,6 +279,7 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
         log.info("Alert sent to %s ✓", ALERT_TO)
+        save_last_email(new_date, worst_date)
     except Exception as exc:
         log.error("Failed to send email: %s", exc)
 
@@ -258,7 +288,7 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
 def main() -> None:
     log.info("=== Appointment Sentinel ===")
     worst = load_worst()
-    log.info("Loaded WORST: %s", worst.date() if worst else "None")
+    log.info("Loaded WORST: %s", worst if worst else "None")
 
     next_appt = get_next_appointment()
 
@@ -267,20 +297,20 @@ def main() -> None:
         return
 
     if worst is None:
-        log.info("First run – recording WORST as %s", next_appt.date())
+        log.info("First run – recording WORST as %s", next_appt)
         save_worst(next_appt)
         return
 
     if next_appt >= worst:
         if next_appt > worst:
-            log.info("Slot moved later (%s → %s) – updating WORST.", worst.date(), next_appt.date())
+            log.info("Slot moved later (%s → %s) – updating WORST.", worst, next_appt)
             save_worst(next_appt)
         else:
-            log.info("No change (%s = WORST) – nothing to do.", next_appt.date())
+            log.info("No change – nothing to do.")
         return
 
-    # next_appt < worst → strictly earlier slot found!
-    log.info("🎉 Earlier slot found: %s < WORST %s", next_appt.date(), worst.date())
+    # next_appt < worst → earlier slot found!
+    log.info("🎉 Earlier slot found: %s < WORST %s", next_appt, worst)
     send_alert(next_appt, worst)
     # WORST intentionally NOT updated – keeps alerting until you book.
 
