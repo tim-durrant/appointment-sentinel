@@ -1,7 +1,7 @@
 # Appointment Sentinel 🗓
 
 Monitors HotDoc every 30 minutes via **GitHub Actions** and emails you when an
-earlier appointment becomes available with Dr Lorna Montgomery at Blackbutt Medical Centre.
+earlier appointment becomes available.
 
 ---
 
