@@ -55,6 +55,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/worst.json
+          git add worst.json
           git diff --cached --quiet || git commit -m "chore: update WORST date [skip ci]"
           git push
