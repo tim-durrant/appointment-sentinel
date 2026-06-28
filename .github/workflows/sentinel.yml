@@ -3,8 +3,9 @@ name: Appointment Sentinel
 on:
   workflow_dispatch:
 
+# No longer needs contents: write — state is stored in repo variables, not files
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
@@ -13,8 +14,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,11 +35,10 @@ jobs:
           SMTP_USER:     ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           ALERT_TO:      ${{ secrets.ALERT_TO }}
+          GH_REPO:       ${{ github.repository }}
+          GH_PAT:        ${{ secrets.GH_PAT }}
         run: python sentinel.py
 
-      # If the scrape failed, a debug screenshot will have been saved.
-      # Upload it so you can download it from the Actions run and see what
-      # the browser actually rendered.
       - name: Upload debug screenshot (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -49,10 +47,4 @@ jobs:
           path: debug_screenshot.png
           if-no-files-found: ignore
 
-      - name: Commit updated WORST state
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f worst.json
-          git diff --cached --quiet || git commit -m "chore: update WORST date [skip ci]"
-          git push
+      # No commit step needed — state lives in GitHub Variables now
