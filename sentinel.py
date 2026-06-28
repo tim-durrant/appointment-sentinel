@@ -4,9 +4,17 @@ Appointment Sentinel
 Monitors HotDoc for the next available appointment and emails you
 when an earlier slot becomes available than the one previously recorded.
 
-Email deduplication rules:
-  - Only send if "new slot" or "previous" has changed since the last email, OR
-  - 24 hours have passed since the last email with the same content.
+State is persisted in GitHub Actions Repository Variables (not files),
+so no commits are needed and there is no superfluous commit history.
+
+Required GitHub Actions Variables (auto-created/updated at runtime):
+  SENTINEL_WORST       - ISO datetime of the latest known appointment
+  SENTINEL_LAST_EMAIL  - JSON blob of last email sent
+
+Required GitHub Actions Secrets:
+  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_TO
+  GH_REPO              - e.g. "timjdurrant/appointment-sentinel"
+  GH_PAT               - Fine-grained PAT with "Variables" read/write permission
 """
 
 import json
@@ -16,11 +24,11 @@ import smtplib
 import logging
 import sys
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
 
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -37,7 +45,7 @@ HOTDOC_URL = (
 
 AVAILABILITY_LABEL  = "Appointments available from:"
 PAGE_LOAD_TIMEOUT   = 30
-EMAIL_REPEAT_HOURS  = 24   # Re-send same content after this many hours
+EMAIL_REPEAT_HOURS  = 24
 
 SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
@@ -45,7 +53,20 @@ SMTP_USER     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_TO      = os.getenv("ALERT_TO", "")
 
-STATE_FILE = Path("worst.json")
+# GitHub API – used for reading/writing repository variables
+GH_REPO = os.getenv("GH_REPO", "")   # e.g. "timjdurrant/appointment-sentinel"
+GH_PAT  = os.getenv("GH_PAT", "")    # Fine-grained PAT
+
+GH_API_BASE = f"https://api.github.com/repos/{GH_REPO}/actions/variables"
+GH_HEADERS  = {
+    "Accept":               "application/vnd.github+json",
+    "Authorization":        f"Bearer {GH_PAT}",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+# Variable names stored in GitHub
+VAR_WORST      = "SENTINEL_WORST"
+VAR_LAST_EMAIL = "SENTINEL_LAST_EMAIL"
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -57,66 +78,81 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── STATE ────────────────────────────────────────────────────────────────────
-#
-# State file schema:
-# {
-#   "worst": "2026-08-03T14:30:00",   ← latest known appointment datetime
-#   "last_email": {
-#     "new_slot":  "2026-07-15T09:00:00",
-#     "previous":  "2026-08-03T14:30:00",
-#     "sent_at":   "2026-06-27T08:00:00"
-#   }
-# }
+# ─── GITHUB VARIABLES STATE ───────────────────────────────────────────────────
 
-def _load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception as exc:
-            log.warning("Could not read state: %s", exc)
-    return {}
+def _get_variable(name: str) -> str | None:
+    """Read a GitHub Actions repository variable. Returns None if not set."""
+    try:
+        r = requests.get(f"{GH_API_BASE}/{name}", headers=GH_HEADERS, timeout=10)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json().get("value")
+    except Exception as exc:
+        log.warning("Failed to read variable %s: %s", name, exc)
+        return None
 
 
-def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+def _set_variable(name: str, value: str) -> None:
+    """Create or update a GitHub Actions repository variable."""
+    try:
+        # Try PATCH first (update existing)
+        r = requests.patch(
+            f"{GH_API_BASE}/{name}",
+            headers=GH_HEADERS,
+            json={"name": name, "value": value},
+            timeout=10,
+        )
+        if r.status_code == 404:
+            # Variable doesn't exist yet — create it
+            r = requests.post(
+                GH_API_BASE,
+                headers=GH_HEADERS,
+                json={"name": name, "value": value},
+                timeout=10,
+            )
+        r.raise_for_status()
+        log.info("Variable %s saved ✓", name)
+    except Exception as exc:
+        log.error("Failed to save variable %s: %s", name, exc)
 
 
 def load_worst() -> datetime | None:
-    raw = _load_state().get("worst")
-    return datetime.fromisoformat(raw) if raw else None
+    raw = _get_variable(VAR_WORST)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def save_worst(dt: datetime) -> None:
-    state = _load_state()
-    state["worst"] = dt.isoformat()
-    _save_state(state)
-    log.info("WORST date saved → %s", dt)
+    _set_variable(VAR_WORST, dt.isoformat())
+    log.info("WORST saved → %s", dt)
 
 
 def load_last_email() -> dict | None:
-    return _load_state().get("last_email")
+    raw = _get_variable(VAR_LAST_EMAIL)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 def save_last_email(new_slot: datetime, previous: datetime) -> None:
-    state = _load_state()
-    state["last_email"] = {
+    payload = json.dumps({
         "new_slot":  new_slot.isoformat(),
         "previous":  previous.isoformat(),
         "sent_at":   datetime.now().isoformat(),
-    }
-    _save_state(state)
-    log.info("Last email record saved.")
+    })
+    _set_variable(VAR_LAST_EMAIL, payload)
 
 # ─── EMAIL DEDUPLICATION ──────────────────────────────────────────────────────
 
 def should_send_email(new_slot: datetime, previous: datetime) -> bool:
-    """
-    Return True if we should send an alert email, based on:
-      1. Content changed (new_slot or previous differs from last email), OR
-      2. 24+ hours have passed since the last email with identical content.
-    """
     last = load_last_email()
 
     if last is None:
@@ -127,20 +163,16 @@ def should_send_email(new_slot: datetime, previous: datetime) -> bool:
     last_previous  = datetime.fromisoformat(last["previous"])
     last_sent_at   = datetime.fromisoformat(last["sent_at"])
 
-    content_changed = (new_slot != last_new_slot) or (previous != last_previous)
-    if content_changed:
-        log.info("Email content has changed – will send.")
+    if (new_slot != last_new_slot) or (previous != last_previous):
+        log.info("Email content changed – will send.")
         return True
 
     hours_since = (datetime.now() - last_sent_at).total_seconds() / 3600
     if hours_since >= EMAIL_REPEAT_HOURS:
-        log.info("%.1f hours since last identical email – will resend.", hours_since)
+        log.info("%.1fh since last identical email – will resend.", hours_since)
         return True
 
-    log.info(
-        "Suppressing duplicate email (content unchanged, only %.1fh since last send).",
-        hours_since,
-    )
+    log.info("Suppressing duplicate email (%.1fh since last send).", hours_since)
     return False
 
 # ─── SCRAPING ─────────────────────────────────────────────────────────────────
@@ -255,7 +287,11 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
         return
 
     def fmt(dt: datetime) -> str:
-        return dt.strftime("%-d %b %Y at %-I:%M %p") if dt.hour or dt.minute else dt.strftime("%-d %b %Y")
+        return (
+            dt.strftime("%-d %b %Y at %-I:%M %p")
+            if dt.hour or dt.minute
+            else dt.strftime("%-d %b %Y")
+        )
 
     subject = f"🗓 Earlier appointment available – {fmt(new_date)}"
     body = (
@@ -268,7 +304,7 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = f"Appointment checker"
+    msg["From"]    = f"Appointment Sentinel <{SMTP_USER}>"
     msg["To"]      = ALERT_TO
     msg.attach(MIMEText(body, "plain"))
 
