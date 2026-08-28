@@ -16,7 +16,6 @@ Required GitHub Actions Secrets:
   GH_REPO              - e.g. "timjdurrant/appointment-sentinel"
   GH_PAT               - Fine-grained PAT with "Variables" read/write permission
 """
-
 import json
 import os
 import re
@@ -24,7 +23,7 @@ import smtplib
 import logging
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -36,39 +35,38 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-# ─── CONFIGURATION ────────────────────────────────────────────────────────────
+# âââ CONFIGURATION ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 HOTDOC_URL = (
     "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/"
     "blackbutt-medical-centre/doctors/lorna-montgomery"
 )
 
-AVAILABILITY_LABEL  = "Appointments available from:"
-PAGE_LOAD_TIMEOUT   = 30
-EMAIL_REPEAT_HOURS  = 24
-
-SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER     = os.getenv("SMTP_USER", "")
+AVAILABILITY_LABEL = "Appointments available from:"
+PAGE_LOAD_TIMEOUT = 30
+EMAIL_REPEAT_HOURS = 24
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-ALERT_TO      = os.getenv("ALERT_TO", "")
+ALERT_TO = os.getenv("ALERT_TO", "")
 
-# GitHub API – used for reading/writing repository variables
-GH_REPO = os.getenv("GH_REPO", "")   # e.g. "timjdurrant/appointment-sentinel"
-GH_PAT  = os.getenv("GH_PAT", "")    # Fine-grained PAT
+# GitHub API â used for reading/writing repository variables
+GH_REPO = os.getenv("GH_REPO", "")  # e.g. "timjdurrant/appointment-sentinel"
+GH_PAT = os.getenv("GH_PAT", "")    # Fine-grained PAT
 
 GH_API_BASE = f"https://api.github.com/repos/{GH_REPO}/actions/variables"
-GH_HEADERS  = {
-    "Accept":               "application/vnd.github+json",
-    "Authorization":        f"Bearer {GH_PAT}",
+GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "Authorization": f"Bearer {GH_PAT}",
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
 # Variable names stored in GitHub
-VAR_WORST      = "SENTINEL_WORST"
+VAR_WORST = "SENTINEL_WORST"
 VAR_LAST_EMAIL = "SENTINEL_LAST_EMAIL"
 
-# ─── LOGGING ──────────────────────────────────────────────────────────────────
+# âââ LOGGING ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +76,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── GITHUB VARIABLES STATE ───────────────────────────────────────────────────
+
+# âââ GITHUB VARIABLES STATE âââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _get_variable(name: str) -> str | None:
     """Read a GitHub Actions repository variable. Returns None if not set."""
@@ -104,7 +103,7 @@ def _set_variable(name: str, value: str) -> None:
             timeout=10,
         )
         if r.status_code == 404:
-            # Variable doesn't exist yet — create it
+            # Variable doesn't exist yet â create it
             r = requests.post(
                 GH_API_BASE,
                 headers=GH_HEADERS,
@@ -112,7 +111,7 @@ def _set_variable(name: str, value: str) -> None:
                 timeout=10,
             )
         r.raise_for_status()
-        log.info("Variable %s saved ✓", name)
+        log.info("Variable %s saved â", name)
     except Exception as exc:
         log.error("Failed to save variable %s: %s", name, exc)
 
@@ -129,7 +128,7 @@ def load_worst() -> datetime | None:
 
 def save_worst(dt: datetime) -> None:
     _set_variable(VAR_WORST, dt.isoformat())
-    log.info("WORST saved → %s", dt)
+    log.info("WORST saved â %s", dt)
 
 
 def load_last_email() -> dict | None:
@@ -144,38 +143,40 @@ def load_last_email() -> dict | None:
 
 def save_last_email(new_slot: datetime, previous: datetime) -> None:
     payload = json.dumps({
-        "new_slot":  new_slot.isoformat(),
-        "previous":  previous.isoformat(),
-        "sent_at":   datetime.now().isoformat(),
+        "new_slot": new_slot.isoformat(),
+        "previous": previous.isoformat(),
+        "sent_at": datetime.now().isoformat(),
     })
     _set_variable(VAR_LAST_EMAIL, payload)
 
-# ─── EMAIL DEDUPLICATION ──────────────────────────────────────────────────────
+
+# âââ EMAIL DEDUPLICATION ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def should_send_email(new_slot: datetime, previous: datetime) -> bool:
     last = load_last_email()
 
     if last is None:
-        log.info("No previous email on record – will send.")
+        log.info("No previous email on record â will send.")
         return True
 
-    last_new_slot  = datetime.fromisoformat(last["new_slot"])
-    last_previous  = datetime.fromisoformat(last["previous"])
-    last_sent_at   = datetime.fromisoformat(last["sent_at"])
+    last_new_slot = datetime.fromisoformat(last["new_slot"])
+    last_previous = datetime.fromisoformat(last["previous"])
+    last_sent_at = datetime.fromisoformat(last["sent_at"])
 
     if (new_slot != last_new_slot) or (previous != last_previous):
-        log.info("Email content changed – will send.")
+        log.info("Email content changed â will send.")
         return True
 
     hours_since = (datetime.now() - last_sent_at).total_seconds() / 3600
     if hours_since >= EMAIL_REPEAT_HOURS:
-        log.info("%.1fh since last identical email – will resend.", hours_since)
+        log.info("%.1fh since last identical email â will resend.", hours_since)
         return True
 
     log.info("Suppressing duplicate email (%.1fh since last send).", hours_since)
     return False
 
-# ─── SCRAPING ─────────────────────────────────────────────────────────────────
+
+# âââ SCRAPING âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _make_driver() -> webdriver.Chrome:
     opts = Options()
@@ -197,10 +198,10 @@ def _make_driver() -> webdriver.Chrome:
 def get_next_appointment() -> datetime | None:
     driver = _make_driver()
     try:
-        log.info("Navigating to HotDoc page …")
+        log.info("Navigating to HotDoc page â¦")
         driver.get(HOTDOC_URL)
 
-        log.info("Waiting for '%s' to appear …", AVAILABILITY_LABEL)
+        log.info("Waiting for '%s' to appear â¦", AVAILABILITY_LABEL)
         try:
             WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
                 EC.text_to_be_present_in_element(
@@ -211,7 +212,10 @@ def get_next_appointment() -> datetime | None:
             log.warning("Timed out waiting for availability text.")
             driver.save_screenshot("debug_screenshot.png")
             try:
-                log.info("Page text:\n%s", driver.find_element(By.TAG_NAME, "body").text[:800])
+                log.info(
+                    "Page text:\n%s",
+                    driver.find_element(By.TAG_NAME, "body").text[:800],
+                )
             except Exception:
                 pass
             return None
@@ -245,42 +249,109 @@ def get_next_appointment() -> datetime | None:
 
 
 def _parse_hotdoc_date(text: str) -> datetime | None:
+    """
+    Parse the two availability formats HotDoc currently exposes:
+
+      "15 Sep, 2:30 pm"  -> explicit calendar date
+      "Tue, 3:15 pm"     -> next occurrence of that weekday
+
+    The weekday-only form is used when the appointment falls within HotDoc's
+    near-term display window and no month/day-of-month is shown.
+    """
     text = text.split("\n")[0].strip().rstrip(".")
-    pattern = re.compile(
-        r"(\d{1,2})\s+(\w+)"
-        r"(?:,\s*(\d{1,2}:\d{2})\s*([aApP][mM]))?",
+    now = datetime.now()
+
+    # Format 1: weekday only, e.g. "Tue, 3:15 pm".
+    weekday_match = re.fullmatch(
+        r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*"
+        r"(\d{1,2}:\d{2})\s*([ap]m)",
+        text,
         re.IGNORECASE,
     )
-    m = pattern.search(text)
-    if not m:
+
+    if weekday_match:
+        weekday_name, appointment_time, ampm = weekday_match.groups()
+
+        weekdays = {
+            "mon": 0,
+            "tue": 1,
+            "wed": 2,
+            "thu": 3,
+            "fri": 4,
+            "sat": 5,
+            "sun": 6,
+        }
+
+        target_weekday = weekdays[weekday_name.lower()]
+        days_ahead = (target_weekday - now.weekday()) % 7
+        candidate_date = now + timedelta(days=days_ahead)
+
+        parsed_time = datetime.strptime(
+            f"{appointment_time} {ampm.upper()}",
+            "%I:%M %p",
+        )
+
+        candidate = candidate_date.replace(
+            hour=parsed_time.hour,
+            minute=parsed_time.minute,
+            second=0,
+            microsecond=0,
+        )
+
+        # If it is already that weekday but the advertised time has passed,
+        # HotDoc necessarily means the same weekday next week.
+        if candidate <= now:
+            candidate += timedelta(days=7)
+
+        return candidate
+
+    # Format 2: explicit date, e.g. "15 Sep, 2:30 pm".
+    date_match = re.fullmatch(
+        r"(\d{1,2})\s+([A-Za-z]{3,9})"
+        r"(?:,\s*(\d{1,2}:\d{2})\s*([ap]m))?",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not date_match:
         return None
 
-    day, month, ttime, ampm = m.group(1), m.group(2), m.group(3), m.group(4)
-    year = datetime.now().year
+    day, month, appointment_time, ampm = date_match.groups()
+    year = now.year
+
     try:
-        if datetime.strptime(f"{day} {month} {year}", "%d %b %Y") < datetime.now():
+        base_date = datetime.strptime(
+            f"{day} {month} {year}",
+            "%d %b %Y",
+        )
+
+        # HotDoc omits the year. If that calendar date has already passed this
+        # year, it refers to the next calendar year.
+        if base_date < now.replace(hour=0, minute=0, second=0, microsecond=0):
             year += 1
-    except ValueError:
-        pass
 
-    if ttime and ampm:
-        date_str = f"{day} {month} {year} {ttime} {ampm.upper()}"
-        fmt = "%d %b %Y %I:%M %p"
-    else:
-        date_str = f"{day} {month} {year}"
-        fmt = "%d %b %Y"
+        if appointment_time and ampm:
+            return datetime.strptime(
+                f"{day} {month} {year} "
+                f"{appointment_time} {ampm.upper()}",
+                "%d %b %Y %I:%M %p",
+            )
 
-    try:
-        return datetime.strptime(date_str, fmt)
+        return datetime.strptime(
+            f"{day} {month} {year}",
+            "%d %b %Y",
+        )
+
     except ValueError as exc:
-        log.warning("strptime failed for '%s': %s", date_str, exc)
+        log.warning("strptime failed for '%s': %s", text, exc)
         return None
 
-# ─── EMAIL ────────────────────────────────────────────────────────────────────
+
+# âââ EMAIL ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def send_alert(new_date: datetime, worst_date: datetime) -> None:
     if not all([SMTP_USER, SMTP_PASSWORD, ALERT_TO]):
-        log.warning("Email credentials not configured – skipping alert.")
+        log.warning("Email credentials not configured â skipping alert.")
         return
 
     if not should_send_email(new_date, worst_date):
@@ -293,19 +364,19 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
             else dt.strftime("%-d %b %Y")
         )
 
-    subject = f"🗓 Earlier appointment available – {fmt(new_date)}"
+    subject = f"ð Earlier appointment available â {fmt(new_date)}"
     body = (
         f"An earlier appointment with Dr Lorna Montgomery is now available!\n\n"
         f"  New slot  : {fmt(new_date)}\n"
         f"  Previous  : {fmt(worst_date)}\n\n"
-        f"Book now → {HOTDOC_URL}\n\n"
-        f"— Appointment Sentinel"
+        f"Book now â {HOTDOC_URL}\n\n"
+        f"â Appointment Sentinel"
     )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = f"Appointment Sentinel <{SMTP_USER}>"
-    msg["To"]      = ALERT_TO
+    msg["From"] = f"Appointment Sentinel <{SMTP_USER}>"
+    msg["To"] = ALERT_TO
     msg.attach(MIMEText(body, "plain"))
 
     try:
@@ -314,12 +385,13 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
-        log.info("Alert sent to %s ✓", ALERT_TO)
+        log.info("Alert sent to %s â", ALERT_TO)
         save_last_email(new_date, worst_date)
     except Exception as exc:
         log.error("Failed to send email: %s", exc)
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+# âââ MAIN âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def main() -> None:
     log.info("=== Appointment Sentinel ===")
@@ -333,22 +405,27 @@ def main() -> None:
         return
 
     if worst is None:
-        log.info("First run – recording WORST as %s", next_appt)
+        log.info("First run â recording WORST as %s", next_appt)
         save_worst(next_appt)
         return
 
     if next_appt >= worst:
         if next_appt > worst:
-            log.info("Slot moved later (%s → %s) – updating WORST.", worst, next_appt)
+            log.info(
+                "Slot moved later (%s â %s) â updating WORST.",
+                worst,
+                next_appt,
+            )
             save_worst(next_appt)
         else:
-            log.info("No change – nothing to do.")
+            log.info("No change â nothing to do.")
         return
 
-    # next_appt < worst → earlier slot found!
-    log.info("🎉 Earlier slot found: %s < WORST %s", next_appt, worst)
+    # next_appt < worst â earlier slot found!
+    log.info("ð Earlier slot found: %s < WORST %s", next_appt, worst)
     send_alert(next_appt, worst)
-    # WORST intentionally NOT updated – keeps alerting until you book.
+
+    # WORST intentionally NOT updated â keeps alerting until you book.
 
 
 if __name__ == "__main__":
