@@ -214,11 +214,11 @@ def get_next_appointment() -> datetime | None:
 
         log.info("Waiting for appointment date button to appear ...")
         try:
-            # Wait for the button with "OutsideRangeNav-action" class containing date text
-            button = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
-                EC.presence_of_element_located(
-                    (By.CLASS_NAME, "OutsideRangeNav-action")
-                )
+            # Wait for the element AND read its text atomically.
+            # This lambda-based approach allows Selenium to retry on stale
+            # references rather than crashing mid-operation.
+            date_text = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+                lambda d: d.find_element(By.CLASS_NAME, "OutsideRangeNav-action").text.strip()
             )
         except TimeoutException:
             log.warning("Timed out waiting for appointment button.")
@@ -232,8 +232,6 @@ def get_next_appointment() -> datetime | None:
                 pass
             return None
 
-        # Extract the date text from the button
-        date_text = button.text.strip()
         log.info("Found appointment text: '%s'", date_text)
 
         dt = _parse_hotdoc_date(date_text)
