@@ -20,6 +20,7 @@ import json
 import os
 import re
 import smtplib
+import socket
 import logging
 import sys
 import traceback
@@ -371,7 +372,7 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
         log.warning("Email credentials not configured - skipping alert.")
         return
 
-    if not should_send_email(new_date, worst_date):
+    if not should_send_email(new_slot=new_date, previous=worst_date):
         return
 
     def fmt(dt: datetime) -> str:
@@ -396,44 +397,41 @@ def send_alert(new_date: datetime, worst_date: datetime) -> None:
     msg["To"] = ALERT_TO
     msg.attach(MIMEText(body, "plain"))
 
-import smtplib
-import socket
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
 
-try:
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
+            # Raises SMTPAuthenticationError if the credentials/app password
+            # are missing or invalid.
+            server.login(SMTP_USER, SMTP_PASSWORD)
 
-        # Raises SMTPAuthenticationError if the credentials/app password
-        # are missing or invalid.
-        server.login(SMTP_USER, SMTP_PASSWORD)
+            refused = server.sendmail(
+                SMTP_USER,
+                ALERT_TO,
+                msg.as_string(),
+            )
 
-        refused = server.sendmail(
-            SMTP_USER,
-            ALERT_TO,
-            msg.as_string(),
-        )
+            # sendmail() can return refused recipients instead of raising,
+            # especially when only some recipients fail.
+            if refused:
+                raise RuntimeError(f"SMTP refused recipients: {refused}")
 
-        # sendmail() can return refused recipients instead of raising,
-        # especially when only some recipients fail.
-        if refused:
-            raise RuntimeError(f"SMTP refused recipients: {refused}")
+        log.info("Alert sent to %s OK", ALERT_TO)
+        save_last_email(new_slot=new_date, previous=worst_date)
 
-    log.info("Alert sent to %s OK", ALERT_TO)
-    save_last_email(new_date, worst_date)
+    except smtplib.SMTPAuthenticationError:
+        log.exception("SMTP authentication failed; check SMTP_USER and the app password")
+        raise
 
-except smtplib.SMTPAuthenticationError:
-    log.exception("SMTP authentication failed; check SMTP_USER and the app password")
-    raise
+    except (smtplib.SMTPException, socket.timeout, OSError):
+        log.exception("SMTP error while sending email")
+        raise
 
-except (smtplib.SMTPException, socket.timeout, OSError):
-    log.exception("SMTP error while sending email")
-    raise
-
-except Exception:
-    log.exception("Unexpected error while sending email")
-    raise
+    except Exception:
+        log.exception("Unexpected error while sending email")
+        raise
 
 
 # ---------------------------------------------------------------------------
