@@ -41,11 +41,11 @@ from selenium.common.exceptions import TimeoutException
 # ---------------------------------------------------------------------------
 
 HOTDOC_URL = (
-    "https://www.hotdoc.com.au/medical-centres/blackbutt-QLD-4306/"
-    "blackbutt-medical-centre/doctors/lorna-montgomery"
+    "https://www.hotdoc.com.au/request/appointment/doctor-time"
+    "?clinic=blackbutt-medical-centre&doctor=lorna-montgomery"
+    "&for=family-member&history=return-visit&reason=114047"
 )
 
-AVAILABILITY_LABEL = "Appointments available from:"
 PAGE_LOAD_TIMEOUT = 30
 EMAIL_REPEAT_HOURS = 24
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -212,15 +212,16 @@ def get_next_appointment() -> datetime | None:
         log.info("Navigating to HotDoc page ...")
         driver.get(HOTDOC_URL)
 
-        log.info("Waiting for '%s' to appear ...", AVAILABILITY_LABEL)
+        log.info("Waiting for appointment date button to appear ...")
         try:
-            WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
-                EC.text_to_be_present_in_element(
-                    (By.TAG_NAME, "body"), AVAILABILITY_LABEL
+            # Wait for the button with "OutsideRangeNav-action" class containing date text
+            button = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+                EC.presence_of_element_located(
+                    (By.CLASS_NAME, "OutsideRangeNav-action")
                 )
             )
         except TimeoutException:
-            log.warning("Timed out waiting for availability text.")
+            log.warning("Timed out waiting for appointment button.")
             driver.save_screenshot("debug_screenshot.png")
             try:
                 log.info(
@@ -231,20 +232,15 @@ def get_next_appointment() -> datetime | None:
                 pass
             return None
 
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        idx = page_text.find(AVAILABILITY_LABEL)
-        if idx == -1:
-            log.error("Label not found in page text.")
-            return None
+        # Extract the date text from the button
+        date_text = button.text.strip()
+        log.info("Found appointment text: '%s'", date_text)
 
-        after_label = page_text[idx + len(AVAILABILITY_LABEL):].strip()[:40]
-        log.info("Text after label: '%s'", after_label)
-
-        dt = _parse_hotdoc_date(after_label)
+        dt = _parse_hotdoc_date(date_text)
         if dt:
             log.info("Parsed appointment date: %s", dt)
         else:
-            log.warning("Could not parse date from: '%s'", after_label)
+            log.warning("Could not parse date from: '%s'", date_text)
         return dt
 
     except Exception as exc:
