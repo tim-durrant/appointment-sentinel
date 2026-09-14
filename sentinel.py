@@ -46,6 +46,7 @@ HOTDOC_URL = (
 )
 
 PAGE_LOAD_TIMEOUT = 30
+LINK_DETECT_TIMEOUT = 15  # Separate timeout for booking link detection
 EMAIL_REPEAT_HOURS = 24
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -205,6 +206,61 @@ def _make_driver() -> webdriver.Chrome:
     return webdriver.Chrome(options=opts)
 
 
+def _wait_for_booking_link(driver, timeout: int = 15):
+    """
+    Wait for booking link to be populated with href attribute.
+    Uses JavaScript-based polling to detect when the link is actually ready.
+    """
+    def link_has_href(driver):
+        """Wait for any link with 'appointment' in href to be present."""
+        try:
+            # Try finding link with appointment in href
+            link = driver.find_element(
+                By.XPATH,
+                "//a[contains(@href, 'appointment') and contains(@href, 'when=')]"
+            )
+            href = link.get_attribute("href")
+            if href and "when=" in href:
+                log.info("Found appointment link via XPath")
+                return link
+            return False
+        except:
+            return False
+
+    try:
+        # First attempt: XPath with href check (more flexible)
+        link = WebDriverWait(driver, timeout).until(link_has_href)
+        return link
+    except TimeoutException:
+        log.warning("XPath-based link detection timed out, trying fallback selectors...")
+        
+        # Fallback 1: Look for any link in AvailabilityRow-action
+        try:
+            link = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "[class*='AvailabilityRow-action'] a[href*='appointment']")
+                )
+            )
+            log.info("Found appointment link via AvailabilityRow-action")
+            return link
+        except TimeoutException:
+            pass
+        
+        # Fallback 2: Look for any link with 'when=' parameter
+        try:
+            link = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "a[href*='when=']")
+                )
+            )
+            log.info("Found appointment link via when= parameter")
+            return link
+        except TimeoutException:
+            pass
+        
+        raise TimeoutException("Could not find booking link with any selector")
+
+
 def get_next_appointment() -> datetime | None:
     driver = _make_driver()
     try:
@@ -222,23 +278,30 @@ def get_next_appointment() -> datetime | None:
             log.info("Date label found, extracting text ...")
             date_text = date_label.text.strip()
             
-            # Find the booking link in the AvailabilityRow-action
-            booking_link = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".AvailabilityRow-action a")
-                )
-            )
-            href = booking_link.get_attribute("href")
-            
         except TimeoutException:
-            log.error("Timed out waiting for appointment information.")
+            log.error("Timed out waiting for appointment date label.")
             _save_debug_artifacts(driver)
             raise RuntimeError(
-                f"Failed to load appointment data within {PAGE_LOAD_TIMEOUT}s. "
+                f"Failed to load appointment date label within {PAGE_LOAD_TIMEOUT}s. "
                 "Check debug_screenshot.png and debug_page_source.html for details."
             )
 
         log.info("Found appointment date: '%s'", date_text)
+        
+        # Now try to find the booking link with separate timeout
+        try:
+            booking_link = _wait_for_booking_link(driver, timeout=LINK_DETECT_TIMEOUT)
+            href = booking_link.get_attribute("href")
+            
+        except TimeoutException:
+            log.error("Timed out waiting for booking link.")
+            _save_debug_artifacts(driver)
+            raise RuntimeError(
+                f"Failed to load booking link within {LINK_DETECT_TIMEOUT}s. "
+                "The page may be slow to render appointment links. "
+                "Check debug_screenshot.png and debug_page_source.html for details."
+            )
+        
         log.info("Found booking link: %s", href)
         
         # Extract datetime from the booking link's 'when' parameter
