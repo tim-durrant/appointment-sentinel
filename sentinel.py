@@ -231,9 +231,12 @@ def get_next_appointment() -> datetime | None:
             href = booking_link.get_attribute("href")
             
         except TimeoutException:
-            log.warning("Timed out waiting for appointment information.")
+            log.error("Timed out waiting for appointment information.")
             _save_debug_artifacts(driver)
-            return None
+            raise RuntimeError(
+                f"Failed to load appointment data within {PAGE_LOAD_TIMEOUT}s. "
+                "Check debug_screenshot.png and debug_page_source.html for details."
+            )
 
         log.info("Found appointment date: '%s'", date_text)
         log.info("Found booking link: %s", href)
@@ -243,15 +246,21 @@ def get_next_appointment() -> datetime | None:
         if dt:
             log.info("Parsed appointment datetime from link: %s", dt)
         else:
-            log.warning("Could not parse datetime from booking link: %s", href)
+            log.error("Could not parse datetime from booking link: %s", href)
             _save_debug_artifacts(driver)
+            raise RuntimeError(
+                f"Failed to parse appointment datetime from booking link: {href}"
+            )
         return dt
 
+    except RuntimeError:
+        # Re-raise known errors (timeout, parse failures) with our error message
+        raise
     except Exception as exc:
         log.error("Scrape error: %s", exc)
         log.error(traceback.format_exc())
         _save_debug_artifacts(driver)
-        return None
+        raise
     finally:
         driver.quit()
 
