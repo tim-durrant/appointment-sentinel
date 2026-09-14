@@ -232,14 +232,7 @@ def get_next_appointment() -> datetime | None:
             
         except TimeoutException:
             log.warning("Timed out waiting for appointment information.")
-            driver.save_screenshot("debug_screenshot.png")
-            try:
-                log.info(
-                    "Page text:\n%s",
-                    driver.find_element(By.TAG_NAME, "body").text[:800],
-                )
-            except Exception:
-                pass
+            _save_debug_artifacts(driver)
             return None
 
         log.info("Found appointment date: '%s'", date_text)
@@ -251,18 +244,39 @@ def get_next_appointment() -> datetime | None:
             log.info("Parsed appointment datetime from link: %s", dt)
         else:
             log.warning("Could not parse datetime from booking link: %s", href)
+            _save_debug_artifacts(driver)
         return dt
 
     except Exception as exc:
         log.error("Scrape error: %s", exc)
         log.error(traceback.format_exc())
-        try:
-            driver.save_screenshot("debug_screenshot.png")
-        except Exception:
-            pass
+        _save_debug_artifacts(driver)
         return None
     finally:
         driver.quit()
+
+
+def _save_debug_artifacts(driver) -> None:
+    """Save screenshot and page source for debugging."""
+    try:
+        driver.save_screenshot("debug_screenshot.png")
+        log.info("Screenshot saved to debug_screenshot.png")
+    except Exception as exc:
+        log.warning("Failed to save screenshot: %s", exc)
+    
+    try:
+        page_source = driver.page_source
+        with open("debug_page_source.html", "w", encoding="utf-8") as f:
+            f.write(page_source)
+        log.info("Page source saved to debug_page_source.html (%d bytes)", len(page_source))
+    except Exception as exc:
+        log.warning("Failed to save page source: %s", exc)
+    
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text[:1000]
+        log.info("Page text (first 1000 chars):\n%s", body_text)
+    except Exception as exc:
+        log.warning("Failed to extract page text: %s", exc)
 
 
 def _parse_booking_link(href: str) -> datetime | None:
