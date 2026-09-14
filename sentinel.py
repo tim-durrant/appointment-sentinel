@@ -24,7 +24,7 @@ import socket
 import logging
 import sys
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import urlparse, parse_qs, unquote
@@ -123,17 +123,30 @@ def _set_variable(name: str, value: str) -> None:
         log.error("Failed to save variable %s: %s", name, exc)
 
 
+def _ensure_aware_datetime(dt: datetime) -> datetime:
+    """
+    Ensure a datetime is timezone-aware.
+    If it's naive (no timezone), assume UTC.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def load_worst() -> datetime | None:
     raw = _get_variable(VAR_WORST)
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        dt = datetime.fromisoformat(raw)
+        return _ensure_aware_datetime(dt)
     except ValueError:
         return None
 
 
 def save_worst(dt: datetime) -> None:
+    # Ensure we store timezone-aware datetimes
+    dt = _ensure_aware_datetime(dt)
     _set_variable(VAR_WORST, dt.isoformat())
     log.info("WORST saved -> %s", dt)
 
@@ -149,10 +162,13 @@ def load_last_email() -> dict | None:
 
 
 def save_last_email(new_slot: datetime, previous: datetime) -> None:
+    # Ensure we store timezone-aware datetimes
+    new_slot = _ensure_aware_datetime(new_slot)
+    previous = _ensure_aware_datetime(previous)
     payload = json.dumps({
         "new_slot": new_slot.isoformat(),
         "previous": previous.isoformat(),
-        "sent_at": datetime.now().isoformat(),
+        "sent_at": datetime.now(timezone.utc).isoformat(),
     })
     _set_variable(VAR_LAST_EMAIL, payload)
 
@@ -176,7 +192,7 @@ def should_send_email(new_slot: datetime, previous: datetime) -> bool:
         log.info("Email content changed - will send.")
         return True
 
-    hours_since = (datetime.now() - last_sent_at).total_seconds() / 3600
+    hours_since = (datetime.now(timezone.utc) - last_sent_at).total_seconds() / 3600
     if hours_since >= EMAIL_REPEAT_HOURS:
         log.info("%.1fh since last identical email - will resend.", hours_since)
         return True
@@ -372,7 +388,8 @@ def _parse_booking_link(href: str) -> datetime | None:
         
         # Parse the ISO 8601 datetime string
         dt = datetime.fromisoformat(when_value)
-        return dt
+        # Ensure it's timezone-aware
+        return _ensure_aware_datetime(dt)
         
     except (ValueError, KeyError, IndexError) as exc:
         log.warning("Failed to parse booking link datetime: %s", exc)
