@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import urlparse, parse_qs, unquote
+from zoneinfo import ZoneInfo
 
 import requests
 from selenium import webdriver
@@ -68,6 +69,8 @@ GH_HEADERS = {
 # Variable names stored in GitHub
 VAR_WORST = "SENTINEL_WORST"
 VAR_LAST_EMAIL = "SENTINEL_LAST_EMAIL"
+
+BRISBANE = ZoneInfo("Australia/Brisbane")
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -125,12 +128,15 @@ def _set_variable(name: str, value: str) -> None:
 
 def _ensure_aware_datetime(dt: datetime) -> datetime:
     """
-    Ensure a datetime is timezone-aware.
-    If it's naive (no timezone), assume UTC.
+    Express a datetime in Brisbane local time.
+
+    Older values without an offset are interpreted as Brisbane local time;
+    values with an offset are converted to Brisbane time before comparison
+    and persistence.
     """
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+        return dt.replace(tzinfo=BRISBANE)
+    return dt.astimezone(BRISBANE)
 
 
 def load_worst() -> datetime | None:
