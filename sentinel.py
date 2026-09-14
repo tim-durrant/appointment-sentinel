@@ -27,6 +27,7 @@ import traceback
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 from selenium import webdriver
@@ -221,13 +222,13 @@ def get_next_appointment() -> datetime | None:
             log.info("Date label found, extracting text ...")
             date_text = date_label.text.strip()
             
-            # Now find the corresponding time in the AvailabilityRow-action
-            time_span = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+            # Find the booking link in the AvailabilityRow-action
+            booking_link = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
                 EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".AvailabilityRow-action span")
+                    (By.CSS_SELECTOR, ".AvailabilityRow-action a")
                 )
             )
-            time_text = time_span.text.strip()
+            href = booking_link.get_attribute("href")
             
         except TimeoutException:
             log.warning("Timed out waiting for appointment information.")
@@ -241,15 +242,15 @@ def get_next_appointment() -> datetime | None:
                 pass
             return None
 
-        log.info("Found appointment date: '%s', time: '%s'", date_text, time_text)
+        log.info("Found appointment date: '%s'", date_text)
+        log.info("Found booking link: %s", href)
         
-        # Combine date and time, then parse
-        full_text = f"{date_text} {time_text}"
-        dt = _parse_hotdoc_date(full_text)
+        # Extract datetime from the booking link's 'when' parameter
+        dt = _parse_booking_link(href)
         if dt:
-            log.info("Parsed appointment date: %s", dt)
+            log.info("Parsed appointment datetime from link: %s", dt)
         else:
-            log.warning("Could not parse date from: '%s'", full_text)
+            log.warning("Could not parse datetime from booking link: %s", href)
         return dt
 
     except Exception as exc:
@@ -264,107 +265,31 @@ def get_next_appointment() -> datetime | None:
         driver.quit()
 
 
-def _parse_hotdoc_date(text: str) -> datetime | None:
+def _parse_booking_link(href: str) -> datetime | None:
     """
-    Parse the two availability formats HotDoc currently exposes:
-
-      "15 Sep, 2:30 pm"  -> explicit calendar date
-      "Tue, 3:15 pm"     -> next occurrence of that weekday
-
-    The weekday-only form is used when the appointment falls within HotDoc's
-    near-term display window and no month/day-of-month is shown.
+    Extract the appointment datetime from the booking link's 'when' parameter.
+    
+    The 'when' parameter contains a URL-encoded ISO 8601 datetime string.
+    Example: when=2026-09-21T15%3A15%3A00%2B10%3A00
+    Decoded: when=2026-09-21T15:15:00+10:00
     """
-    text = text.split("\n")[0].strip().rstrip(".")
-    now = datetime.now()
-
-    # Format 1: weekday only, e.g. "Tue, 3:15 pm".
-    weekday_match = re.fullmatch(
-        r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*"
-        r"(\d{1,2}:\d{2})\s*([ap]m)",
-        text,
-        re.IGNORECASE,
-    )
-
-    if weekday_match:
-        weekday_name, appointment_time, ampm = weekday_match.groups()
-
-        weekdays = {
-            "mon": 0,
-            "tue": 1,
-            "wed": 2,
-            "thu": 3,
-            "fri": 4,
-            "sat": 5,
-            "sun": 6,
-        }
-
-        target_weekday = weekdays[weekday_name.lower()]
-        days_ahead = (target_weekday - now.weekday()) % 7
-        candidate_date = now + timedelta(days=days_ahead)
-
-        parsed_time = datetime.strptime(
-            f"{appointment_time} {ampm.upper()}",
-            "%I:%M %p",
-        )
-
-        candidate = candidate_date.replace(
-            hour=parsed_time.hour,
-            minute=parsed_time.minute,
-            second=0,
-            microsecond=0,
-        )
-
-        # If it is already that weekday but the advertised time has passed,
-        # HotDoc necessarily means the same weekday next week.
-        if candidate <= now:
-            candidate += timedelta(days=7)
-
-        return candidate
-
-    # Format 2: explicit date, e.g. "15 Sep, 2:30 pm".
-    date_match = re.fullmatch(
-        r"(\d{1,2})\s+([A-Za-z]{3,9})"
-        r"(?:,\s*(\d{1,2}:\d{2})\s*([ap]m))?",
-        text,
-        re.IGNORECASE,
-    )
-
-    if not date_match:
-        return None
-
-    day, month, appointment_time, ampm = date_match.groups()
-    year = now.year
-
     try:
-        base_date = datetime.strptime(
-            f"{day} {month} {year}",
-            "%d %b %Y",
-        )
-
-        # HotDoc omits the year. If that calendar date has already passed this
-        # year, it refers to the next calendar year.
-        if base_date < now.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        ):
-            year += 1
-
-        if appointment_time and ampm:
-            return datetime.strptime(
-                f"{day} {month} {year} "
-                f"{appointment_time} {ampm.upper()}",
-                "%d %b %Y %I:%M %p",
-            )
-
-        return datetime.strptime(
-            f"{day} {month} {year}",
-            "%d %b %Y",
-        )
-
-    except ValueError as exc:
-        log.warning("strptime failed for '%s': %s", text, exc)
+        parsed_url = urlparse(href)
+        query_params = parse_qs(parsed_url.query)
+        
+        if "when" not in query_params:
+            log.warning("No 'when' parameter found in booking link")
+            return None
+        
+        when_value = query_params["when"][0]
+        log.info("Extracted 'when' parameter: %s", when_value)
+        
+        # Parse the ISO 8601 datetime string
+        dt = datetime.fromisoformat(when_value)
+        return dt
+        
+    except (ValueError, KeyError, IndexError) as exc:
+        log.warning("Failed to parse booking link datetime: %s", exc)
         return None
 
 
