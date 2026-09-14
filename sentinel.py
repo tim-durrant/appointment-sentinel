@@ -41,9 +41,7 @@ from selenium.common.exceptions import TimeoutException
 # ---------------------------------------------------------------------------
 
 HOTDOC_URL = (
-    "https://www.hotdoc.com.au/request/appointment/doctor-time"
-    "?clinic=blackbutt-medical-centre&doctor=lorna-montgomery"
-    "&for=family-member&history=return-visit&reason=114047"
+    "https://www.hotdoc.com.au/search?filters=specialty-27&in=blackbutt-QLD-4306&query=Montgomery"
 )
 
 PAGE_LOAD_TIMEOUT = 30
@@ -212,16 +210,27 @@ def get_next_appointment() -> datetime | None:
         log.info("Navigating to HotDoc page ...")
         driver.get(HOTDOC_URL)
 
-        log.info("Waiting for appointment date button to appear ...")
+        log.info("Waiting for appointment availability to load ...")
         try:
-            # Wait for the element AND read its text atomically.
-            # This lambda-based approach allows Selenium to retry on stale
-            # references rather than crashing mid-operation.
-            date_text = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
-                lambda d: d.find_element(By.CLASS_NAME, "OutsideRangeNav-action").text.strip()
+            # Wait for the AvailabilityRow-label (date) to appear
+            date_label = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+                EC.presence_of_element_located(
+                    (By.CLASS_NAME, "AvailabilityRow-label")
+                )
             )
+            log.info("Date label found, extracting text ...")
+            date_text = date_label.text.strip()
+            
+            # Now find the corresponding time in the AvailabilityRow-action
+            time_span = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".AvailabilityRow-action span")
+                )
+            )
+            time_text = time_span.text.strip()
+            
         except TimeoutException:
-            log.warning("Timed out waiting for appointment button.")
+            log.warning("Timed out waiting for appointment information.")
             driver.save_screenshot("debug_screenshot.png")
             try:
                 log.info(
@@ -232,13 +241,15 @@ def get_next_appointment() -> datetime | None:
                 pass
             return None
 
-        log.info("Found appointment text: '%s'", date_text)
-
-        dt = _parse_hotdoc_date(date_text)
+        log.info("Found appointment date: '%s', time: '%s'", date_text, time_text)
+        
+        # Combine date and time, then parse
+        full_text = f"{date_text} {time_text}"
+        dt = _parse_hotdoc_date(full_text)
         if dt:
             log.info("Parsed appointment date: %s", dt)
         else:
-            log.warning("Could not parse date from: '%s'", date_text)
+            log.warning("Could not parse date from: '%s'", full_text)
         return dt
 
     except Exception as exc:
