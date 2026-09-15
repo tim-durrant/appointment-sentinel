@@ -9,6 +9,7 @@ so no commits are needed and there is no superfluous commit history.
 
 Required GitHub Actions Variables (auto-created/updated at runtime):
   SENTINEL_WORST       - ISO datetime of the latest known appointment
+  SENTINEL_NEXT_APPOINTMENT - ISO datetime of the latest scraped appointment
   SENTINEL_LAST_EMAIL  - JSON blob of last email sent
 
 Required GitHub Actions Secrets:
@@ -68,6 +69,7 @@ GH_HEADERS = {
 
 # Variable names stored in GitHub
 VAR_WORST = "SENTINEL_WORST"
+VAR_NEXT_APPOINTMENT = "SENTINEL_NEXT_APPOINTMENT"
 VAR_LAST_EMAIL = "SENTINEL_LAST_EMAIL"
 
 BRISBANE = ZoneInfo("Australia/Brisbane")
@@ -155,6 +157,13 @@ def save_worst(dt: datetime) -> None:
     dt = _ensure_aware_datetime(dt)
     _set_variable(VAR_WORST, dt.isoformat())
     log.info("WORST saved -> %s", dt)
+
+
+def save_next_appointment(dt: datetime) -> None:
+    """Persist the latest successfully scraped appointment datetime."""
+    dt = _ensure_aware_datetime(dt)
+    _set_variable(VAR_NEXT_APPOINTMENT, dt.isoformat())
+    log.info("NEXT_APPOINTMENT saved -> %s", dt)
 
 
 def load_last_email() -> dict | None:
@@ -487,6 +496,8 @@ def main() -> None:
     if next_appt is None:
         log.info("No appointment found this run.")
         return
+
+    save_next_appointment(next_appt)
 
     if worst is None:
         log.info("First run - recording WORST as %s", next_appt)
