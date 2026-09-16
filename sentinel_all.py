@@ -58,6 +58,11 @@ def fetch_appointments() -> dict[str, str | None]:
         if not isinstance(name, str) or not name:
             continue
 
+        if name.startswith("Dr. "):
+            name = name[4:]
+        elif name.startswith("Dr "):
+            name = name[3:]
+
         performer_in = employee.get("performerIn") or {}
         start_date = (
             performer_in.get("startDate")
