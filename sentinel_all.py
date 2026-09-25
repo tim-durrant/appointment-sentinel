@@ -98,6 +98,19 @@ def save_variable(value: str) -> None:
     response.raise_for_status()
 
 
+def write_output_file(value: str) -> None:
+    output_path = os.getenv("APPOINTMENTS_OUTPUT")
+    if not output_path:
+        return
+
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as output:
+        output.write(value + "\n")
+
+
 def main() -> None:
     appointments = fetch_appointments()
     value = json.dumps(
@@ -106,6 +119,7 @@ def main() -> None:
         separators=(",", ":"),
     )
     save_variable(value)
+    write_output_file(value)
     print(f"Saved {len(appointments)} doctors to {VAR_NEXT_APPOINTMENT_ALL}")
 
 
