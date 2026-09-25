@@ -1,122 +1,70 @@
-# Appointment Sentinel 🗓
+# Appointment Sentinel
 
-Monitors HotDoc every 30 minutes via **GitHub Actions** and emails you when an
-earlier appointment becomes available .
+Appointment Sentinel checks HotDoc for the next available appointment, emails
+when Dr Lorna Montgomery has an earlier slot, and publishes a compact JSON
+snapshot for other tools.
 
----
+## Runtime flow
 
-## How it works
+1. Google Cloud Scheduler dispatches the GitHub Actions workflow every 30
+   minutes on weekdays during the configured Brisbane hours.
+2. `sentinel.py` makes one unauthenticated HotDoc API request.
+3. The response is used both for Lorna's existing notification logic and for
+   the all-doctors appointment map.
+4. The compact map is saved to the `SENTINEL_NEXT_APPOINTMENT_ALL` repository
+   variable and deployed as GitHub Pages.
 
-| Step | Logic |
-|------|-------|
-| 1 | GitHub Actions runs `sentinel.py` on a cron every 30 minutes |
-| 2 | Headless Chrome opens the HotDoc page and waits for the text **"Appointments available from:"** to appear |
-| 3 | The date immediately following that label is extracted and parsed |
-| 4 | If no WORST date recorded yet → save this date as WORST, done |
-| 5 | If new date > WORST → slot moved later → update WORST, done |
-| 6 | If new date < WORST → **earlier slot found!** → send email alert 🎉 |
+Scheduler configuration: [Appointment Sentinel Cloud Scheduler job](https://console.cloud.google.com/cloudscheduler)
 
-### Email deduplication
-
-To avoid inbox spam, the script tracks the content and time of the last email sent:
-
-| Situation | Result |
-|-----------|--------|
-| No email ever sent | Send ✓ |
-| New slot date has changed | Send ✓ |
-| Previous (WORST) date has changed | Send ✓ |
-| Same content, sent less than 24 hours ago | Suppress ✗ |
-| Same content, sent 24+ hours ago | Re-send as a reminder ✓ |
-
-### State persistence
-
-All state is stored in `worst.json` in the root of the repository and automatically
-committed back after each run by the workflow. This file tracks:
-
-```json
-{
-  "worst": "2026-08-03T14:30:00",
-  "last_email": {
-    "new_slot":  "2026-07-15T09:00:00",
-    "previous":  "2026-08-03T14:30:00",
-    "sent_at":   "2026-06-27T08:00:00"
-  }
-}
-```
-
----
-
-## Setup (one-time)
-
-### 1 — Create a new GitHub repository
-
-Download this folder from Google Drive, then run:
+Published appointment data:
 
 ```bash
-git init
-git add .
-git commit -m "Initial commit"
-gh repo create appointment-sentinel --private --source=. --push
+curl --fail --silent \
+  https://tim-durrant.github.io/appointment-sentinel/appointments.json
 ```
 
-### 2 — Add GitHub Actions Secrets
+## State and secrets
 
-Go to your repo → **Settings → Secrets and variables → Actions → New repository secret**
+Notification state is stored in GitHub Actions repository variables:
 
-| Secret name     | Value |
-|-----------------|-------|
-| `SMTP_HOST`     | `smtp.gmail.com` |
-| `SMTP_PORT`     | `587` |
-| `SMTP_USER`     | Your Gmail address |
-| `SMTP_PASSWORD` | A [Gmail App Password](https://myaccount.google.com/apppasswords) |
-| `ALERT_TO`      | Where to send alerts (can be the same as `SMTP_USER`) |
+- `SENTINEL_WORST`
+- `SENTINEL_NEXT_APPOINTMENT`
+- `SENTINEL_LAST_EMAIL`
+- `SENTINEL_NEXT_APPOINTMENT_ALL`
 
-> **Gmail App Password:** Go to Google Account → Security → 2-Step Verification → App Passwords.
-> Generate one for "Mail" and paste it here. Do **not** use your normal Gmail password.
+Configure these repository secrets under **Settings → Secrets and variables →
+Actions**:
 
-### 3 — Allow Actions to push commits
+| Secret | Purpose |
+|---|---|
+| `SMTP_HOST` | SMTP server, normally `smtp.gmail.com` |
+| `SMTP_PORT` | SMTP port, normally `587` |
+| `SMTP_USER` | SMTP account |
+| `SMTP_PASSWORD` | SMTP app password |
+| `ALERT_TO` | Notification recipient |
+| `GH_PAT` | Fine-grained token allowed to read/write repository variables |
 
-Go to **Settings → Actions → General → Workflow permissions** and select
-**"Read and write permissions"**.
+The Pages deployment also requires GitHub Pages to use **GitHub Actions** as
+its build and deployment source.
 
-### 4 — Trigger manually to test
+## Files
 
-Go to **Actions → Appointment Sentinel → Run workflow** to run immediately
-without waiting for the cron. After a successful run you should see a commit
-from `github-actions[bot]` updating `worst.json` — that confirms state is
-being persisted correctly.
-
----
-
-## File structure
-
-```
+```text
 appointment-sentinel/
-├── .github/
-│   └── workflows/
-│       └── sentinel.yml      ← GitHub Actions workflow (runs every 30 min)
-├── sentinel.py               ← Main script
-├── requirements.txt          ← Python dependencies (selenium)
-├── worst.json                ← Persisted state (auto-committed by Actions)
-├── .gitignore
+├── .github/workflows/publish-appointments.yml
+├── sentinel.py
+├── requirements.txt
 └── README.md
 ```
 
----
+The workflow is manually dispatchable for testing. Cloud Scheduler is the
+production scheduler, so the workflow itself has no GitHub cron schedule.
 
-## Customisation
+## Local checks
 
-- **Check interval:** Edit the `cron` expression in `.github/workflows/sentinel.yml`
-- **Doctor URL:** Change `HOTDOC_URL` at the top of `sentinel.py`
-- **Email repeat window:** Change `EMAIL_REPEAT_HOURS` in `sentinel.py` (default: 24)
-- **Email display name:** The From field shows as `Appointment Sentinel <your@gmail.com>`.
-  To change the display name, edit the `msg["From"]` line in `send_alert()`.
+Install dependencies and run syntax validation with:
 
----
-
-## Debugging
-
-If a run fails, the workflow uploads a `debug_screenshot.png` as a downloadable
-artifact so you can see exactly what the headless browser rendered. Find it under:
-
-**Actions → (failed run) → Artifacts → debug-screenshot**
+```bash
+python -m pip install -r requirements.txt
+python -m py_compile sentinel.py
+```

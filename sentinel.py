@@ -11,6 +11,7 @@ Required GitHub Actions Variables (auto-created/updated at runtime):
   SENTINEL_WORST       - ISO datetime of the latest known appointment
   SENTINEL_NEXT_APPOINTMENT - ISO datetime of the latest scraped appointment
   SENTINEL_LAST_EMAIL  - JSON blob of last email sent
+  SENTINEL_NEXT_APPOINTMENT_ALL - compact JSON map of all doctors' appointments
 
 Required GitHub Actions Secrets:
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_TO
@@ -19,25 +20,16 @@ Required GitHub Actions Secrets:
 """
 import json
 import os
-import re
 import smtplib
 import socket
 import logging
 import sys
-import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from urllib.parse import urlparse, parse_qs, unquote
 from zoneinfo import ZoneInfo
 
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -46,9 +38,22 @@ from selenium.common.exceptions import TimeoutException
 HOTDOC_URL = (
     "https://www.hotdoc.com.au/search?filters=specialty-27&in=blackbutt-QLD-4306&query=Montgomery"
 )
+HOTDOC_API_URL = (
+    "https://www.hotdoc.com.au/api/patient/pages?path="
+    "%252Fmedical-centres%252Fblackbutt-QLD-4306"
+    "%252Fblackbutt-medical-centre%252Fdoctors"
+)
+HOTDOC_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/26.6.2 Safari/605.1.15"
+    ),
+    "Accept": "application/au.com.hotdoc.v6",
+    "app-timezone": "Australia/Brisbane",
+}
+TARGET_DOCTOR = "Lorna Montgomery"
 
-PAGE_LOAD_TIMEOUT = 30
-LINK_DETECT_TIMEOUT = 15  # Separate timeout for booking link detection
 EMAIL_REPEAT_HOURS = 24
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -71,6 +76,7 @@ GH_HEADERS = {
 VAR_WORST = "SENTINEL_WORST"
 VAR_NEXT_APPOINTMENT = "SENTINEL_NEXT_APPOINTMENT"
 VAR_LAST_EMAIL = "SENTINEL_LAST_EMAIL"
+VAR_NEXT_APPOINTMENT_ALL = "SENTINEL_NEXT_APPOINTMENT_ALL"
 
 BRISBANE = ZoneInfo("Australia/Brisbane")
 
@@ -217,198 +223,82 @@ def should_send_email(new_slot: datetime, previous: datetime) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# SCRAPING
+# HOTDOC API
 # ---------------------------------------------------------------------------
 
-def _make_driver() -> webdriver.Chrome:
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,900")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument(
-        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+def fetch_appointments() -> dict[str, str | None]:
+    """Fetch the compact next-appointment map for every doctor."""
+    response = requests.get(
+        HOTDOC_API_URL,
+        headers=HOTDOC_HEADERS,
+        timeout=30,
     )
-    return webdriver.Chrome(options=opts)
+    response.raise_for_status()
+    payload = response.json()
+
+    employees = payload["page"]["metadata"]["schema"]["employee"]
+    if not isinstance(employees, list) or not employees:
+        raise RuntimeError("HotDoc response contained no doctors")
+
+    appointments: dict[str, str | None] = {}
+    for employee in employees:
+        if not isinstance(employee, dict):
+            continue
+
+        name = employee.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+
+        if name.startswith("Dr. "):
+            name = name[4:]
+        elif name.startswith("Dr "):
+            name = name[3:]
+
+        performer_in = employee.get("performerIn") or {}
+        start_date = (
+            performer_in.get("startDate")
+            if isinstance(performer_in, dict)
+            else None
+        )
+        appointments[name] = start_date if isinstance(start_date, str) else None
+
+    if not appointments:
+        raise RuntimeError("HotDoc response contained no named doctors")
+
+    return appointments
 
 
-def _wait_for_booking_link(driver, timeout: int = 15):
-    """
-    Wait for booking link to be populated with href attribute.
-    Uses JavaScript-based polling to detect when the link is actually ready.
-    """
-    def link_has_href(driver):
-        """Wait for any link with 'appointment' in href to be present."""
-        try:
-            # Try finding link with appointment in href
-            link = driver.find_element(
-                By.XPATH,
-                "//a[contains(@href, 'appointment') and contains(@href, 'when=')]"
-            )
-            href = link.get_attribute("href")
-            if href and "when=" in href:
-                log.info("Found appointment link via XPath")
-                return link
-            return False
-        except:
-            return False
+def _save_appointments_variable(value: str) -> None:
+    """Persist the compact all-doctors JSON in the repository variable."""
+    _set_variable(VAR_NEXT_APPOINTMENT_ALL, value)
+
+
+def _write_appointments_file(value: str) -> None:
+    """Write the compact all-doctors JSON for the GitHub Pages artifact."""
+    output_path = os.getenv("APPOINTMENTS_OUTPUT")
+    if not output_path:
+        return
+
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as output:
+        output.write(value + "\n")
+
+
+def get_next_appointment(appointments: dict[str, str | None]) -> datetime | None:
+    """Return the target doctor's next appointment from the API response."""
+    raw_value = appointments.get(TARGET_DOCTOR)
+    if not raw_value:
+        raise RuntimeError(f"HotDoc response contained no appointment for {TARGET_DOCTOR}")
 
     try:
-        # First attempt: XPath with href check (more flexible)
-        link = WebDriverWait(driver, timeout).until(link_has_href)
-        return link
-    except TimeoutException:
-        log.warning("XPath-based link detection timed out, trying fallback selectors...")
-        
-        # Fallback 1: Look for any link in AvailabilityRow-action
-        try:
-            link = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "[class*='AvailabilityRow-action'] a[href*='appointment']")
-                )
-            )
-            log.info("Found appointment link via AvailabilityRow-action")
-            return link
-        except TimeoutException:
-            pass
-        
-        # Fallback 2: Look for any link with 'when=' parameter
-        try:
-            link = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "a[href*='when=']")
-                )
-            )
-            log.info("Found appointment link via when= parameter")
-            return link
-        except TimeoutException:
-            pass
-        
-        raise TimeoutException("Could not find booking link with any selector")
-
-
-def get_next_appointment() -> datetime | None:
-    driver = _make_driver()
-    try:
-        log.info("Navigating to HotDoc page ...")
-        driver.get(HOTDOC_URL)
-
-        log.info("Waiting for appointment availability to load ...")
-        try:
-            # Wait for the AvailabilityRow-label (date) to appear
-            date_label = WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
-                EC.presence_of_element_located(
-                    (By.CLASS_NAME, "AvailabilityRow-label")
-                )
-            )
-            log.info("Date label found, extracting text ...")
-            date_text = date_label.text.strip()
-            
-        except TimeoutException:
-            log.error("Timed out waiting for appointment date label.")
-            _save_debug_artifacts(driver)
-            raise RuntimeError(
-                f"Failed to load appointment date label within {PAGE_LOAD_TIMEOUT}s. "
-                "Check debug_screenshot.png and debug_page_source.html for details."
-            )
-
-        log.info("Found appointment date: '%s'", date_text)
-        
-        # Now try to find the booking link with separate timeout
-        try:
-            booking_link = _wait_for_booking_link(driver, timeout=LINK_DETECT_TIMEOUT)
-            href = booking_link.get_attribute("href")
-            
-        except TimeoutException:
-            log.error("Timed out waiting for booking link.")
-            _save_debug_artifacts(driver)
-            raise RuntimeError(
-                f"Failed to load booking link within {LINK_DETECT_TIMEOUT}s. "
-                "The page may be slow to render appointment links. "
-                "Check debug_screenshot.png and debug_page_source.html for details."
-            )
-        
-        log.info("Found booking link: %s", href)
-        
-        # Extract datetime from the booking link's 'when' parameter
-        dt = _parse_booking_link(href)
-        if dt:
-            log.info("Parsed appointment datetime from link: %s", dt)
-        else:
-            log.error("Could not parse datetime from booking link: %s", href)
-            _save_debug_artifacts(driver)
-            raise RuntimeError(
-                f"Failed to parse appointment datetime from booking link: {href}"
-            )
-        return dt
-
-    except RuntimeError:
-        # Re-raise known errors (timeout, parse failures) with our error message
-        raise
-    except Exception as exc:
-        log.error("Scrape error: %s", exc)
-        log.error(traceback.format_exc())
-        _save_debug_artifacts(driver)
-        raise
-    finally:
-        driver.quit()
-
-
-def _save_debug_artifacts(driver) -> None:
-    """Save screenshot and page source for debugging."""
-    try:
-        driver.save_screenshot("debug_screenshot.png")
-        log.info("Screenshot saved to debug_screenshot.png")
-    except Exception as exc:
-        log.warning("Failed to save screenshot: %s", exc)
-    
-    try:
-        page_source = driver.page_source
-        with open("debug_page_source.html", "w", encoding="utf-8") as f:
-            f.write(page_source)
-        log.info("Page source saved to debug_page_source.html (%d bytes)", len(page_source))
-    except Exception as exc:
-        log.warning("Failed to save page source: %s", exc)
-    
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text[:1000]
-        log.info("Page text (first 1000 chars):\n%s", body_text)
-    except Exception as exc:
-        log.warning("Failed to extract page text: %s", exc)
-
-
-def _parse_booking_link(href: str) -> datetime | None:
-    """
-    Extract the appointment datetime from the booking link's 'when' parameter.
-    
-    The 'when' parameter contains a URL-encoded ISO 8601 datetime string.
-    Example: when=2026-09-21T15%3A15%3A00%2B10%3A00
-    Decoded: when=2026-09-21T15:15:00+10:00
-    """
-    try:
-        parsed_url = urlparse(href)
-        query_params = parse_qs(parsed_url.query)
-        
-        if "when" not in query_params:
-            log.warning("No 'when' parameter found in booking link")
-            return None
-        
-        when_value = query_params["when"][0]
-        log.info("Extracted 'when' parameter: %s", when_value)
-        
-        # Parse the ISO 8601 datetime string
-        dt = datetime.fromisoformat(when_value)
-        # Ensure it's timezone-aware
-        return _ensure_aware_datetime(dt)
-        
-    except (ValueError, KeyError, IndexError) as exc:
-        log.warning("Failed to parse booking link datetime: %s", exc)
-        return None
+        return _ensure_aware_datetime(datetime.fromisoformat(raw_value))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid appointment datetime for {TARGET_DOCTOR}: {raw_value}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +381,17 @@ def main() -> None:
     worst = load_worst()
     log.info("Loaded WORST: %s", worst if worst else "None")
 
-    next_appt = get_next_appointment()
+    appointments = fetch_appointments()
+    compact_json = json.dumps(
+        appointments,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _save_appointments_variable(compact_json)
+    _write_appointments_file(compact_json)
+    log.info("Published %d doctors", len(appointments))
+
+    next_appt = get_next_appointment(appointments)
 
     if next_appt is None:
         log.info("No appointment found this run.")
