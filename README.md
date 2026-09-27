@@ -9,8 +9,8 @@ snapshot for other tools.
 1. Google Cloud Scheduler dispatches the GitHub Actions workflow every 30
    minutes on weekdays during the configured Brisbane hours.
 2. `sentinel.py` makes one unauthenticated HotDoc API request.
-3. The response is used both for Lorna's existing notification logic and for
-   the all-doctors appointment map.
+3. The response is used both for Lorna's existing notification logic and for the
+   all-doctors appointment map.
 4. The compact map is saved to the `SENTINEL_NEXT_APPOINTMENT_ALL` repository
    variable and deployed as GitHub Pages.
 
@@ -19,11 +19,33 @@ Scheduler configuration: [Appointment Sentinel Cloud Scheduler job](https://cons
 Published appointment data:
 
 ```bash
-curl --fail --silent \
-  https://tim-durrant.github.io/appointment-sentinel/appointments.json
+curl --fail --silent --compressed \
+  https://tim-durrant.github.io/appointment-sentinel/appointments.json \
+  | jq -r '
+      def month_name:
+        ["January","February","March","April","May","June","July","August","September","October","November","December"][(tonumber) - 1];
+
+      def time12:
+        tonumber as $h
+        | if $h == 0 then "12"
+          elif $h > 12 then (($h - 12) | tostring)
+          else ($h | tostring)
+          end;
+
+      def meridiem:
+        tonumber as $h
+        | if $h < 12 then "AM" else "PM" end;
+
+      to_entries[]
+      | (
+          .value
+          | capture("(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})T(?<h>[0-9]{2}):(?<min>[0-9]{2}):[0-9]{2}\\+(?<tz>[0-9]{2}):(?<tzmin>[0-9]{2})")
+        ) as $t
+      | "\(.key): \($t.d | tonumber) \($t.m | month_name) \($t.y) at \($t.h | time12):\($t.min) \($t.h | meridiem) (Brisbane time)"
+    '
 ```
 
-## State and secrets
+State and secrets
 
 Notification state is stored in GitHub Actions repository variables:
 
@@ -44,8 +66,8 @@ Actions**:
 | `ALERT_TO` | Notification recipient |
 | `GH_PAT` | Fine-grained token allowed to read/write repository variables |
 
-The Pages deployment also requires GitHub Pages to use **GitHub Actions** as
-its build and deployment source.
+The Pages deployment also requires GitHub Pages to use **GitHub Actions** as its
+build and deployment source.
 
 ## Files
 
