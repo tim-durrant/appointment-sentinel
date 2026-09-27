@@ -11,7 +11,7 @@ Required GitHub Actions Variables (auto-created/updated at runtime):
   SENTINEL_WORST       - ISO datetime of the latest known appointment
   SENTINEL_NEXT_APPOINTMENT - ISO datetime of the latest scraped appointment
   SENTINEL_LAST_EMAIL  - JSON blob of last email sent
-  SENTINEL_NEXT_APPOINTMENT_ALL - compact JSON map of all doctors' appointments
+  SENTINEL_NEXT_APPOINTMENT_ALL - JSON map of all doctors' appointment records
 
 Required GitHub Actions Secrets:
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_TO
@@ -268,8 +268,44 @@ def fetch_appointments() -> dict[str, str | None]:
     return appointments
 
 
+def _appointment_record(raw_value: str | None) -> dict[str, str | None]:
+    """Return the stable published record for one doctor's next appointment."""
+    if not raw_value:
+        return {
+            "startDate": None,
+            "display": None,
+            "timezone": "Australia/Brisbane",
+        }
+
+    try:
+        appointment = datetime.fromisoformat(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid appointment datetime: {raw_value}") from exc
+
+    appointment = _ensure_aware_datetime(appointment)
+    hour = appointment.strftime("%I").lstrip("0") or "12"
+    return {
+        "startDate": appointment.isoformat(),
+        "display": (
+            f"{appointment.day} {appointment.strftime('%B %Y')} "
+            f"at {hour}:{appointment:%M} {appointment:%p}"
+        ),
+        "timezone": "Australia/Brisbane",
+    }
+
+
+def _published_appointments(
+    appointments: dict[str, str | None],
+) -> dict[str, dict[str, str | None]]:
+    """Build the public object shape for every doctor in the response."""
+    return {
+        name: _appointment_record(raw_value)
+        for name, raw_value in appointments.items()
+    }
+
+
 def _save_appointments_variable(value: str) -> None:
-    """Persist the compact all-doctors JSON in the repository variable."""
+    """Persist the all-doctors JSON in the repository variable."""
     _set_variable(VAR_NEXT_APPOINTMENT_ALL, value)
 
 
@@ -382,8 +418,9 @@ def main() -> None:
     log.info("Loaded WORST: %s", worst if worst else "None")
 
     appointments = fetch_appointments()
+    published_appointments = _published_appointments(appointments)
     compact_json = json.dumps(
-        appointments,
+        published_appointments,
         ensure_ascii=False,
         separators=(",", ":"),
     )
