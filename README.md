@@ -1,5 +1,35 @@
 # Appointment Sentinel
 
+## Cloudflare migration
+
+The Cloudflare Worker implementation in `src/index.ts` is the migration path
+from the original GitHub Actions implementation in `sentinel.py`. It fetches
+HotDoc on a Cloudflare Cron Trigger, stores state and the public snapshot in
+R2, and serves the snapshot at `/appointments.json`.
+
+Local checks:
+
+```bash
+npm install
+npm run typecheck
+npm test
+npx wrangler dev --local --var RUN_TOKEN:test-token
+curl http://127.0.0.1:8787/health
+curl -X POST -H 'Authorization: Bearer test-token' http://127.0.0.1:8787/run
+curl http://127.0.0.1:8787/appointments.json | jq .
+```
+
+Before enabling email alerts in Cloudflare, configure the Resend secrets:
+
+```bash
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put ALERT_TO
+npx wrangler secret put ALERT_FROM
+```
+
+The legacy workflow remains in `.github/workflows/publish-appointments.yml`
+until the Cloudflare Worker has been tested in production.
+
 Appointment Sentinel checks HotDoc for the next available appointment, emails
 when Dr Lorna Montgomery has an earlier slot, and publishes a compact JSON
 snapshot for other tools.

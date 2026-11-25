@@ -1,0 +1,28 @@
+name = "appointment-sentinel"
+main = "src/index.ts"
+compatibility_date = "2026-11-25"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[triggers]
+# Brisbane has no daylight-saving transition. These are UTC times selected to
+# cover the existing weekday Brisbane monitoring window without running on the
+# top of the hour.
+crons = ["17,47 0-8 * * 1-5"]
+
+[[r2_buckets]]
+binding = "APPOINTMENT_DATA"
+bucket_name = "appointment-sentinel-data"
+
+[vars]
+HOTDOC_API_URL = "https://www.hotdoc.com.au/api/patient/pages?path=%252Fmedical-centres%252Fblackbutt-QLD-4306%252Fblackbutt-medical-centre%252Fdoctors"
+HOTDOC_BOOKING_URL = "https://www.hotdoc.com.au/search?filters=specialty-27&in=blackbutt-QLD-4306&query=Montgomery"
+TARGET_DOCTOR = "Lorna Montgomery"
+TIMEZONE = "Australia/Brisbane"
+EMAIL_REPEAT_HOURS = "24"
+
+# Configure these with `wrangler secret put` before enabling notifications.
+# ALERT_TO and ALERT_FROM are intentionally not placed here because they are
+# operational configuration rather than public application configuration.
