@@ -8,9 +8,9 @@ enabled = true
 
 [triggers]
 # Brisbane has no daylight-saving transition. These are UTC times selected to
-# cover the existing weekday Brisbane monitoring window without running on the
-# top of the hour.
-crons = ["17,47 0-8 * * 1-5"]
+# cover the daily Brisbane monitoring window without running on the top of the
+# hour.
+crons = ["17,47 0-8 * * *"]
 
 [[r2_buckets]]
 binding = "APPOINTMENT_DATA"
