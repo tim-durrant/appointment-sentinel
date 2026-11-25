@@ -19,13 +19,10 @@ curl -X POST -H 'Authorization: Bearer test-token' http://127.0.0.1:8787/run
 curl http://127.0.0.1:8787/appointments.json | jq .
 ```
 
-Before enabling email alerts in Cloudflare, configure the Resend secrets:
-
-```bash
-npx wrangler secret put RESEND_API_KEY
-npx wrangler secret put ALERT_TO
-npx wrangler secret put ALERT_FROM
-```
+Email alerts use Cloudflare Email Service through the native `EMAIL` binding.
+The binding is restricted to `sentinel@timdurrant.com` sending to
+`tim.j.durrant@gmail.com`. The protected `/test-email` endpoint is available
+for verifying delivery after deployment.
 
 The legacy workflow remains in `.github/workflows/publish-appointments.yml`
 until the Cloudflare Worker has been tested in production.

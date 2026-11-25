@@ -31,11 +31,21 @@ export interface Env {
   TARGET_DOCTOR: string;
   TIMEZONE: string;
   EMAIL_REPEAT_HOURS: string;
-  ALERT_TO?: string;
-  ALERT_FROM?: string;
-  RESEND_API_KEY?: string;
+  SENDER_ADDRESS: string;
+  ALERT_TO: string;
+  EMAIL: EmailSender;
   RUN_TOKEN?: string;
 }
+
+type EmailSender = {
+  send(message: {
+    to: string;
+    from: string;
+    subject: string;
+    text: string;
+    html?: string;
+  }): Promise<{ messageId: string }>;
+};
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -59,6 +69,14 @@ export default {
       }
       await runCheck(env);
       return Response.json({ ok: true });
+    }
+
+    if (request.method === "POST" && url.pathname === "/test-email") {
+      if (!env.RUN_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.RUN_TOKEN}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const messageId = await sendTestEmail(env);
+      return Response.json({ ok: true, messageId });
     }
 
     return new Response("Not found", { status: 404 });
@@ -182,25 +200,24 @@ async function updateState(state: SentinelState, next: string | null, env: Env, 
 }
 
 async function sendAlert(next: string, previous: string, env: Env): Promise<boolean> {
-  if (!env.RESEND_API_KEY || !env.ALERT_TO || !env.ALERT_FROM) {
-    console.warn("[sentinel] alert not sent: Resend secrets are not configured");
-    return false;
-  }
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: env.ALERT_FROM,
-      to: [env.ALERT_TO],
-      subject: "Earlier appointment available",
-      text: `An earlier appointment with Dr Lorna Montgomery is available.\n\nNew slot: ${next}\nPrevious: ${previous}\n\nBook now: ${env.HOTDOC_BOOKING_URL}`,
-    }),
+  await env.EMAIL.send({
+    from: env.SENDER_ADDRESS,
+    to: env.ALERT_TO,
+    subject: "Earlier appointment available",
+    text: `An earlier appointment with Dr Lorna Montgomery is available.\n\nNew slot: ${next}\nPrevious: ${previous}\n\nBook now: ${env.HOTDOC_BOOKING_URL}`,
   });
-  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
   return true;
+}
+
+async function sendTestEmail(env: Env): Promise<string> {
+  const result = await env.EMAIL.send({
+    from: env.SENDER_ADDRESS,
+    to: env.ALERT_TO,
+    subject: "Appointment Sentinel Cloudflare test",
+    text: "This is a test email from the Cloudflare Appointment Sentinel Worker.",
+    html: "<p>This is a test email from the Cloudflare Appointment Sentinel Worker.</p>",
+  });
+  return result.messageId;
 }
 
 async function readState(bucket: R2Bucket): Promise<SentinelState> {

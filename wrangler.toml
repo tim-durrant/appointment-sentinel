@@ -16,12 +16,19 @@ crons = ["17,47 0-8 * * 1-5"]
 binding = "APPOINTMENT_DATA"
 bucket_name = "appointment-sentinel-data"
 
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["sentinel@timdurrant.com"]
+allowed_destination_addresses = ["tim.j.durrant@gmail.com"]
+
 [vars]
 HOTDOC_API_URL = "https://www.hotdoc.com.au/api/patient/pages?path=%252Fmedical-centres%252Fblackbutt-QLD-4306%252Fblackbutt-medical-centre%252Fdoctors"
 HOTDOC_BOOKING_URL = "https://www.hotdoc.com.au/search?filters=specialty-27&in=blackbutt-QLD-4306&query=Montgomery"
 TARGET_DOCTOR = "Lorna Montgomery"
 TIMEZONE = "Australia/Brisbane"
 EMAIL_REPEAT_HOURS = "24"
+SENDER_ADDRESS = "sentinel@timdurrant.com"
+ALERT_TO = "tim.j.durrant@gmail.com"
 
 # Configure these with `wrangler secret put` before enabling notifications.
 # ALERT_TO and ALERT_FROM are intentionally not placed here because they are
