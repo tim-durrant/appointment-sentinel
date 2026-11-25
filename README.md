@@ -22,7 +22,8 @@ curl http://127.0.0.1:8787/appointments.json | jq .
 Email alerts use Cloudflare Email Service through the native `EMAIL` binding.
 The binding is restricted to `sentinel@timdurrant.com` sending to
 `tim.j.durrant@gmail.com`. The protected `/test-email` endpoint is available
-for verifying delivery after deployment.
+for verifying delivery after deployment. Unhandled scheduled-job failures also
+send a failure email, with a 24-hour cooldown during a prolonged outage.
 
 The legacy workflow remains in `.github/workflows/publish-appointments.yml`
 until the Cloudflare Worker has been tested in production.

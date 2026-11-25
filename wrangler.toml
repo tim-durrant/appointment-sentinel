@@ -27,6 +27,7 @@ HOTDOC_BOOKING_URL = "https://www.hotdoc.com.au/search?filters=specialty-27&in=b
 TARGET_DOCTOR = "Lorna Montgomery"
 TIMEZONE = "Australia/Brisbane"
 EMAIL_REPEAT_HOURS = "24"
+FAILURE_REPEAT_HOURS = "24"
 SENDER_ADDRESS = "sentinel@timdurrant.com"
 ALERT_TO = "tim.j.durrant@gmail.com"
 

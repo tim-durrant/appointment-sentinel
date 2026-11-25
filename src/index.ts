@@ -22,6 +22,7 @@ type EmailRecord = {
 type SentinelState = {
   worst: string | null;
   lastEmail: EmailRecord | null;
+  lastFailureEmailAt: string | null;
 };
 
 export interface Env {
@@ -33,6 +34,7 @@ export interface Env {
   EMAIL_REPEAT_HOURS: string;
   SENDER_ADDRESS: string;
   ALERT_TO: string;
+  FAILURE_REPEAT_HOURS: string;
   EMAIL: EmailSender;
   RUN_TOKEN?: string;
 }
@@ -49,7 +51,7 @@ type EmailSender = {
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runCheck(env));
+    ctx.waitUntil(runCheckWithFailureAlert(env));
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -67,7 +69,7 @@ export default {
       if (!env.RUN_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.RUN_TOKEN}`) {
         return new Response("Unauthorized", { status: 401 });
       }
-      await runCheck(env);
+      await runCheckWithFailureAlert(env);
       return Response.json({ ok: true });
     }
 
@@ -97,6 +99,20 @@ export async function runCheck(env: Env, now = new Date()): Promise<void> {
   const nextState = await updateState(state, next, env, now);
   await writeState(env.APPOINTMENT_DATA, nextState);
   console.log("[sentinel] check completed", { doctors: Object.keys(appointments).length, next });
+}
+
+async function runCheckWithFailureAlert(env: Env): Promise<void> {
+  try {
+    await runCheck(env);
+  } catch (error) {
+    console.error("[sentinel] check failed", error);
+    try {
+      await sendFailureAlert(error, env);
+    } catch (notificationError) {
+      console.error("[sentinel] failure alert could not be sent", notificationError);
+    }
+    throw error;
+  }
 }
 
 async function fetchAppointments(apiUrl: string): Promise<AppointmentMap> {
@@ -220,13 +236,45 @@ async function sendTestEmail(env: Env): Promise<string> {
   return result.messageId;
 }
 
+async function sendFailureAlert(error: unknown, env: Env): Promise<void> {
+  const state = await readState(env.APPOINTMENT_DATA);
+  const now = new Date();
+  const lastSent = state.lastFailureEmailAt ? new Date(state.lastFailureEmailAt) : null;
+  const repeatHours = Number(env.FAILURE_REPEAT_HOURS || 24);
+  if (lastSent && (now.valueOf() - lastSent.valueOf()) / 3_600_000 < repeatHours) {
+    console.warn("[sentinel] failure alert suppressed by cooldown");
+    return;
+  }
+
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  await env.EMAIL.send({
+    from: env.SENDER_ADDRESS,
+    to: env.ALERT_TO,
+    subject: "Appointment Sentinel job failed",
+    text: `Appointment Sentinel failed at ${now.toISOString()}.\n\n${detail}\n\nCheck the Worker logs in Cloudflare.`,
+    html: `<p>Appointment Sentinel failed at <strong>${now.toISOString()}</strong>.</p><p><code>${escapeHtml(detail)}</code></p><p>Check the Worker logs in Cloudflare.</p>`,
+  });
+  await writeState(env.APPOINTMENT_DATA, { ...state, lastFailureEmailAt: now.toISOString() });
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+  })[character] ?? character);
+}
+
 async function readState(bucket: R2Bucket): Promise<SentinelState> {
   const object = await bucket.get(STATE_KEY);
-  if (!object) return { worst: null, lastEmail: null };
+  if (!object) return { worst: null, lastEmail: null, lastFailureEmailAt: null };
   const parsed = (await object.json()) as Partial<SentinelState>;
   return {
     worst: typeof parsed.worst === "string" ? parsed.worst : null,
     lastEmail: parsed.lastEmail && typeof parsed.lastEmail === "object" ? parsed.lastEmail as EmailRecord : null,
+    lastFailureEmailAt: typeof parsed.lastFailureEmailAt === "string" ? parsed.lastFailureEmailAt : null,
   };
 }
 
