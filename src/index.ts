@@ -1,5 +1,6 @@
 const STATE_KEY = "state.json";
 const APPOINTMENTS_KEY = "appointments.json";
+const LOGS_KEY = "logs.json";
 
 const DEFAULT_HOTDOC_HEADERS = {
   "User-Agent": "Mozilla/5.0 Appointment Sentinel/1.0",
@@ -23,6 +24,16 @@ type SentinelState = {
   worst: string | null;
   lastEmail: EmailRecord | null;
   lastFailureEmailAt: string | null;
+};
+type RunLog = {
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  trigger: "scheduled" | "manual";
+  status: "success" | "failure";
+  doctors?: number;
+  nextAppointment?: string | null;
+  error?: string;
 };
 
 export interface Env {
@@ -51,7 +62,7 @@ type EmailSender = {
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runCheckWithFailureAlert(env));
+    ctx.waitUntil(runCheckWithFailureAlert(env, "scheduled"));
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -65,11 +76,21 @@ export default {
       return getPublishedAppointments(env);
     }
 
+    if (request.method === "GET" && url.pathname === "/logs") {
+      return getLogsPage(env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/logs.json") {
+      return Response.json(await readLogs(env.APPOINTMENT_DATA), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/run") {
       if (!env.RUN_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.RUN_TOKEN}`) {
         return new Response("Unauthorized", { status: 401 });
       }
-      await runCheckWithFailureAlert(env);
+      await runCheckWithFailureAlert(env, "manual");
       return Response.json({ ok: true });
     }
 
@@ -85,7 +106,7 @@ export default {
   },
 };
 
-export async function runCheck(env: Env, now = new Date()): Promise<void> {
+export async function runCheck(env: Env, now = new Date()): Promise<{ doctors: number; next: string | null }> {
   console.log("[sentinel] check started", { at: now.toISOString() });
   const state = await readState(env.APPOINTMENT_DATA);
   const appointments = await fetchAppointments(env.HOTDOC_API_URL);
@@ -99,11 +120,22 @@ export async function runCheck(env: Env, now = new Date()): Promise<void> {
   const nextState = await updateState(state, next, env, now);
   await writeState(env.APPOINTMENT_DATA, nextState);
   console.log("[sentinel] check completed", { doctors: Object.keys(appointments).length, next });
+  return { doctors: Object.keys(appointments).length, next };
 }
 
-async function runCheckWithFailureAlert(env: Env): Promise<void> {
+async function runCheckWithFailureAlert(env: Env, trigger: RunLog["trigger"]): Promise<void> {
+  const startedAt = new Date();
   try {
-    await runCheck(env);
+    const result = await runCheck(env);
+    await recordRunLog(env.APPOINTMENT_DATA, {
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt.valueOf(),
+      trigger,
+      status: "success",
+      doctors: result.doctors,
+      nextAppointment: result.next,
+    });
   } catch (error) {
     console.error("[sentinel] check failed", error);
     try {
@@ -111,6 +143,14 @@ async function runCheckWithFailureAlert(env: Env): Promise<void> {
     } catch (notificationError) {
       console.error("[sentinel] failure alert could not be sent", notificationError);
     }
+    await recordRunLog(env.APPOINTMENT_DATA, {
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt.valueOf(),
+      trigger,
+      status: "failure",
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
     throw error;
   }
 }
@@ -265,6 +305,41 @@ function escapeHtml(value: string): string {
     "'": "&#39;",
     '"': "&quot;",
   })[character] ?? character);
+}
+
+async function readLogs(bucket: R2Bucket): Promise<RunLog[]> {
+  const object = await bucket.get(LOGS_KEY);
+  if (!object) return [];
+  const parsed = await object.json<unknown>();
+  return Array.isArray(parsed) ? parsed.filter((entry): entry is RunLog => Boolean(entry && typeof entry === "object")) : [];
+}
+
+async function recordRunLog(bucket: R2Bucket, log: RunLog): Promise<void> {
+  const logs = await readLogs(bucket);
+  logs.unshift(log);
+  await bucket.put(LOGS_KEY, JSON.stringify(logs.slice(0, 3)), {
+    httpMetadata: { contentType: "application/json; charset=utf-8", cacheControl: "no-store" },
+  });
+}
+
+async function getLogsPage(env: Env): Promise<Response> {
+  const logs = await readLogs(env.APPOINTMENT_DATA);
+  const rows = logs.length === 0
+    ? `<tr><td colspan="7">No executions recorded yet.</td></tr>`
+    : logs.map((log) => {
+      const statusClass = log.status === "success" ? "success" : "failure";
+      const result = log.status === "success"
+        ? `${log.doctors ?? "?"} doctors; ${log.nextAppointment ?? "no appointment"}`
+        : escapeHtml(log.error ?? "Unknown error");
+      return `<tr><td>${escapeHtml(log.startedAt)}</td><td>${escapeHtml(log.trigger)}</td><td class="${statusClass}">${escapeHtml(log.status)}</td><td>${log.durationMs} ms</td><td>${escapeHtml(result)}</td></tr>`;
+    }).join("");
+
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Appointment Sentinel Logs</title>
+<style>
+body{font:15px system-ui,sans-serif;background:#f6f7f9;color:#17202a;margin:2rem}main{max-width:1100px;margin:auto;background:white;padding:1.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px #0001}h1{margin-top:0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #e5e7eb;vertical-align:top}th{font-size:.85rem;color:#667085}.success{color:#087f5b;font-weight:600}.failure{color:#c92a2a;font-weight:600}code{white-space:pre-wrap;word-break:break-word}a{color:#175cd3}
+</style></head><body><main><h1>Appointment Sentinel</h1><p>Last three Worker executions. Refreshes every 60 seconds.</p><table><thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table><p><a href="/logs.json">View JSON</a> · <a href="/appointments.json">View appointments</a></p></main></body></html>`;
+  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
 async function readState(bucket: R2Bucket): Promise<SentinelState> {

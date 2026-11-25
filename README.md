@@ -25,6 +25,9 @@ The binding is restricted to `sentinel@timdurrant.com` sending to
 for verifying delivery after deployment. Unhandled scheduled-job failures also
 send a failure email, with a 24-hour cooldown during a prolonged outage.
 
+Execution history is available at `/logs` on the Worker URL, with the raw
+three-entry feed at `/logs.json`.
+
 The legacy workflow remains in `.github/workflows/publish-appointments.yml`
 until the Cloudflare Worker has been tested in production.
 
