@@ -325,21 +325,37 @@ async function recordRunLog(bucket: R2Bucket, log: RunLog): Promise<void> {
 async function getLogsPage(env: Env): Promise<Response> {
   const logs = await readLogs(env.APPOINTMENT_DATA);
   const rows = logs.length === 0
-    ? `<tr><td colspan="7">No executions recorded yet.</td></tr>`
+    ? `<tr><td colspan="5">No executions recorded yet.</td></tr>`
     : logs.map((log) => {
       const statusClass = log.status === "success" ? "success" : "failure";
       const result = log.status === "success"
         ? `${log.doctors ?? "?"} doctors; ${log.nextAppointment ?? "no appointment"}`
         : escapeHtml(log.error ?? "Unknown error");
-      return `<tr><td>${escapeHtml(log.startedAt)}</td><td>${escapeHtml(log.trigger)}</td><td class="${statusClass}">${escapeHtml(log.status)}</td><td>${log.durationMs} ms</td><td>${escapeHtml(result)}</td></tr>`;
+      return `<tr><td data-label="Started">${escapeHtml(formatLogTime(log.startedAt, env.TIMEZONE))}</td><td data-label="Trigger">${escapeHtml(log.trigger)}</td><td data-label="Status" class="${statusClass}">${escapeHtml(log.status)}</td><td data-label="Duration">${log.durationMs} ms</td><td data-label="Result">${escapeHtml(result)}</td></tr>`;
     }).join("");
 
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Appointment Sentinel Logs</title>
 <style>
-body{font:15px system-ui,sans-serif;background:#f6f7f9;color:#17202a;margin:2rem}main{max-width:1100px;margin:auto;background:white;padding:1.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px #0001}h1{margin-top:0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #e5e7eb;vertical-align:top}th{font-size:.85rem;color:#667085}.success{color:#087f5b;font-weight:600}.failure{color:#c92a2a;font-weight:600}code{white-space:pre-wrap;word-break:break-word}a{color:#175cd3}
+*{box-sizing:border-box}body{font:15px system-ui,sans-serif;background:#f6f7f9;color:#17202a;margin:2rem}main{max-width:1100px;margin:auto;background:white;padding:1.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px #0001}h1{margin-top:0}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #e5e7eb;vertical-align:top}th{font-size:.85rem;color:#667085}.success{color:#087f5b;font-weight:600}.failure{color:#c92a2a;font-weight:600}code{white-space:pre-wrap;word-break:break-word}a{color:#175cd3}
+@media(max-width:700px){body{margin:.75rem;background:#eef2f6}main{padding:1.1rem;border-radius:16px}h1{font-size:1.8rem;line-height:1.1}p{line-height:1.45}table,thead,tbody,tr,td{display:block}thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}tr{margin:1rem 0;border:1px solid #e5e7eb;border-radius:12px;padding:.35rem .75rem;background:#fff}td{display:grid;grid-template-columns:6.2rem minmax(0,1fr);gap:.6rem;padding:.6rem 0;border-bottom:0;overflow-wrap:anywhere}td::before{content:attr(data-label);font-size:.78rem;font-weight:700;color:#667085;text-transform:uppercase;letter-spacing:.03em}.success,.failure{font-weight:700}}
 </style></head><body><main><h1>Appointment Sentinel</h1><p>Last three Worker executions. Refreshes every 60 seconds.</p><table><thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table><p><a href="/logs.json">View JSON</a> · <a href="/appointments.json">View appointments</a></p></main></body></html>`;
   return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+}
+
+function formatLogTime(value: string, timezone: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return new Intl.DateTimeFormat("en-AU", {
+    timeZone: timezone,
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(date).replace(/\b(am|pm)\b/, (marker) => marker.toUpperCase());
 }
 
 async function readState(bucket: R2Bucket): Promise<SentinelState> {
