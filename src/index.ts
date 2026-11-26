@@ -256,11 +256,13 @@ async function updateState(state: SentinelState, next: string | null, env: Env, 
 }
 
 async function sendAlert(next: string, previous: string, env: Env): Promise<boolean> {
+  const newSlot = formatAppointmentTime(next, env.TIMEZONE);
+  const previousSlot = formatAppointmentTime(previous, env.TIMEZONE);
   await env.EMAIL.send({
     from: env.SENDER_ADDRESS,
     to: env.ALERT_TO,
     subject: "Earlier appointment available",
-    text: `An earlier appointment with Dr Lorna Montgomery is available.\n\nNew slot: ${next}\nPrevious: ${previous}\n\nBook now: ${env.HOTDOC_BOOKING_URL}`,
+    text: `An earlier appointment with Dr Lorna Montgomery is available.\n\nNew slot: ${newSlot}\nPrevious: ${previousSlot}\n\nBook now: ${env.HOTDOC_BOOKING_URL}`,
   });
   return true;
 }
@@ -356,6 +358,21 @@ function formatLogTime(value: string, timezone: string): string {
     second: "2-digit",
     hour12: true,
   }).format(date).replace(/\b(am|pm)\b/, (marker) => marker.toUpperCase());
+}
+
+export function formatAppointmentTime(value: string, timezone: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  const display = new Intl.DateTimeFormat("en-AU", {
+    timeZone: timezone,
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date).replace(/\b(am|pm)\b/, (marker) => marker.toUpperCase());
+  return `${display} (${timezone})`;
 }
 
 async function readState(bucket: R2Bucket): Promise<SentinelState> {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPublishedAppointments } from "../src/index.js";
+import { buildPublishedAppointments, formatAppointmentTime } from "../src/index.js";
 
 describe("published appointment records", () => {
   it("preserves doctors without an available appointment", () => {
@@ -18,5 +18,12 @@ describe("published appointment records", () => {
         timezone: "Australia/Brisbane",
       },
     });
+  });
+});
+
+describe("appointment email times", () => {
+  it("formats UTC values in the configured Brisbane timezone", () => {
+    expect(formatAppointmentTime("2026-12-06T23:15:00.000Z", "Australia/Brisbane"))
+      .toBe("7 December 2026 at 9:15 AM (Australia/Brisbane)");
   });
 });
