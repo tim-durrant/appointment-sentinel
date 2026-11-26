@@ -268,12 +268,14 @@ async function sendAlert(next: string, previous: string, env: Env): Promise<bool
 }
 
 async function sendTestEmail(env: Env): Promise<string> {
+  const newSlot = formatAppointmentTime("2026-12-06T23:15:00.000Z", env.TIMEZONE);
+  const previousSlot = formatAppointmentTime("2026-12-08T04:30:00.000Z", env.TIMEZONE);
   const result = await env.EMAIL.send({
     from: env.SENDER_ADDRESS,
     to: env.ALERT_TO,
-    subject: "Appointment Sentinel Cloudflare test",
-    text: "This is a test email from the Cloudflare Appointment Sentinel Worker.",
-    html: "<p>This is a test email from the Cloudflare Appointment Sentinel Worker.</p>",
+    subject: "Appointment Sentinel timezone formatting test",
+    text: `This is a formatting test from the Cloudflare Appointment Sentinel Worker.\n\nNew slot: ${newSlot}\nPrevious: ${previousSlot}`,
+    html: `<p>This is a formatting test from the Cloudflare Appointment Sentinel Worker.</p><p><strong>New slot:</strong> ${newSlot}<br><strong>Previous:</strong> ${previousSlot}</p>`,
   });
   return result.messageId;
 }
