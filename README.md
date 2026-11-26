@@ -31,6 +31,10 @@ send a failure email, with a 24-hour cooldown during a prolonged outage.
 Execution history is available at `/logs` on the Worker URL, with the raw
 three-entry feed at `/logs.json`.
 
+The appointment endpoint accepts an optional `doctor` query parameter. Matching
+is case-insensitive and supports partial names, so
+`/appointments.json?doctor=Montgomery` returns only Lorna Montgomery's record.
+
 Appointment Sentinel checks HotDoc for the next available appointment, emails
 when Dr Lorna Montgomery has an earlier slot, and publishes a compact JSON
 snapshot for other tools.

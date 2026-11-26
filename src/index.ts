@@ -73,7 +73,7 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/appointments.json") {
-      return getPublishedAppointments(env);
+      return getPublishedAppointments(env, url.searchParams.get("doctor"));
     }
 
     if (request.method === "GET" && url.pathname === "/logs") {
@@ -394,9 +394,25 @@ async function writeState(bucket: R2Bucket, state: SentinelState): Promise<void>
   });
 }
 
-async function getPublishedAppointments(env: Env): Promise<Response> {
+export function filterPublishedAppointments(published: PublishedMap, query: string): PublishedMap {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return published;
+  return Object.fromEntries(Object.entries(published).filter(([name]) => name.toLowerCase().includes(normalized)));
+}
+
+async function getPublishedAppointments(env: Env, doctor: string | null): Promise<Response> {
   const object = await env.APPOINTMENT_DATA.get(APPOINTMENTS_KEY);
   if (!object) return Response.json({ error: "No appointment snapshot has been published yet" }, { status: 503 });
+  if (doctor !== null) {
+    const published = await object.json<PublishedMap>();
+    const filtered = filterPublishedAppointments(published, doctor);
+    if (Object.keys(filtered).length === 0) {
+      return Response.json({ error: `No doctor matched: ${doctor}` }, { status: 404 });
+    }
+    return Response.json(filtered, {
+      headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" },
+    });
+  }
   return new Response(await object.arrayBuffer(), {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
